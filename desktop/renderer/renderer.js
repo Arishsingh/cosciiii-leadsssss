@@ -11,7 +11,9 @@
 const $ = (id) => document.getElementById(id);
 
 const el = {
-  location: $("location"), maxResults: $("maxResults"), source: $("source"),
+  location: $("location"), area: $("area"),
+  districtList: $("districtList"), areaList: $("areaList"),
+  maxResults: $("maxResults"), source: $("source"),
   start: $("startBtn"), stop: $("stopBtn"),
   stats: $("stats"),
   sVerified: $("sVerified"), sVerifiedSub: $("sVerifiedSub"),
@@ -30,7 +32,7 @@ const el = {
   detailClose: $("detailClose"),
   logBody: $("logBody"), logCount: $("logCount"), autoscroll: $("autoscroll"),
   clearLogs: $("clearLogs"), toggleLogs: $("toggleLogs"),
-  registryBtn: $("registryBtn"), registryDot: $("registryDot"),
+  brandStates: $("brandStates"), registryBtn: $("registryBtn"), registryDot: $("registryDot"),
   registryLabel: $("registryLabel"), registryModal: $("registryModal"),
   registryClose: $("registryClose"), harvestBtn: $("harvestBtn"),
   harvestPages: $("harvestPages"),
@@ -50,6 +52,7 @@ let pending = false;     // a render is already queued for the next frame
 let running = false;
 let mode = "search";
 let logCount = 0;
+let districtAreas = {};  // district -> [taluka, …], for the Area suggestions
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -338,11 +341,13 @@ el.start.addEventListener("click", async () => {
   renderTable();
   resetPhases();
   setRunning(true);
-  log(`Searching builders in ${location}…`, "system");
+  const areaVal = el.area.value.trim();
+  log(`Searching builders in ${areaVal ? areaVal + ", " : ""}${location}…`, "system");
 
   const res = await window.api.startScrape({
     mode: "search",
     location,
+    area: el.area.value.trim(),
     maxResults: Number(el.maxResults.value) || 100,
     source: el.source.value,
     onlyWithEmail: el.onlyEmail.checked,
@@ -406,7 +411,11 @@ el.exportPdfBtn.addEventListener("click", async () => {
   try {
     const res = await window.api.exportPdf({
       rows,
-      meta: { location: el.location.value.trim(), filters },
+      meta: {
+        location: [el.area.value.trim(), el.location.value.trim()]
+          .filter(Boolean).join(", "),
+        filters,
+      },
     });
     if (res.ok) log(`Exported ${res.count} leads → ${res.path}`, "done");
     else if (!res.canceled) log(res.error || "PDF export failed.", "error");
@@ -439,6 +448,11 @@ async function refreshRegistry() {
     el.registryDot.className = "dot";
     return;
   }
+  // Name the states actually loaded rather than hard-coding one.
+  const states = (s.reraStates || []).map((x) =>
+    x.name.charAt(0) + x.name.slice(1).toLowerCase());
+  el.brandStates.textContent = states.length ? states.join(" · ") : "";
+
   const n = s.reraProjects || 0;
   el.registryLabel.textContent = n
     ? `${n.toLocaleString()} projects`
@@ -451,11 +465,38 @@ async function refreshRegistry() {
   el.regLast.textContent = s.lastHarvest ? s.lastHarvest.replace("_", " ") : "never";
 
   // Districts double as shortcuts — clicking one runs that search.
+  // Feed the District suggestions and remember each district's areas so the
+  // Area list can narrow once a district is chosen.
+  districtAreas = {};
+  (s.reraDistricts || []).forEach((d) => { districtAreas[d.name.toUpperCase()] = d.areas || []; });
+  el.districtList.innerHTML = (s.reraDistricts || [])
+    .map((d) => `<option value="${esc(d.name)}">${d.count} projects</option>`)
+    .join("");
+  refreshAreaList();
+
   el.regDistrictList.innerHTML = (s.reraDistricts || [])
     .slice(0, 24)
     .map((d) => `<span class="chipx" data-d="${esc(d.name)}">${esc(d.name)}<b>${d.count}</b></span>`)
     .join("");
 }
+
+/** Area suggestions follow the district; with none chosen, offer every area. */
+function refreshAreaList() {
+  const d = el.location.value.trim().toUpperCase();
+  let areas = districtAreas[d];
+  if (!areas) {
+    // Allow a partial district name ("mumbai" -> "Mumbai Suburban").
+    const hit = Object.keys(districtAreas).find((k) => d && k.includes(d));
+    areas = hit ? districtAreas[hit] : [];
+  }
+  if (!areas.length) {
+    areas = [...new Set(Object.values(districtAreas).flat())].slice(0, 60);
+  }
+  el.areaList.innerHTML = areas.map((a) => `<option value="${esc(a)}"></option>`).join("");
+}
+
+el.location.addEventListener("input", refreshAreaList);
+el.location.addEventListener("change", refreshAreaList);
 
 el.regDistrictList.addEventListener("click", (e) => {
   const chip = e.target.closest(".chipx");
@@ -508,9 +549,9 @@ document.addEventListener("keydown", (e) => {
     el.registryModal.hidden = true;
   }
 });
-el.location.addEventListener("keydown", (e) => {
+[el.location, el.area].forEach((n) => n.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !running) el.start.click();
-});
+}));
 
 refreshRegistry();
 loadSettings();

@@ -137,7 +137,7 @@ def run_harvest(args, emitter):
 
 # ------------------------------------------------------------------- search
 
-def _seed_from_registry(store, location, limit, emitter, publish):
+def _seed_from_registry(store, location, area, limit, emitter, publish):
     """Insert cached RERA promoters for `location`, publishing each immediately.
 
     This is the fast path and the reason a search feels instant: the registry is
@@ -146,11 +146,12 @@ def _seed_from_registry(store, location, limit, emitter, publish):
     until the network stages finish. Promoters arrive busiest-first, so the
     largest developers are on screen first.
     """
-    rows = store.rera_promoters(district=location, limit=limit)
+    rows = store.rera_promoters(district=location, area=area, limit=limit)
     if not rows:
         return 0
+    where = f"{area}, {location}" if area else location
     emitter.status("rera", "scraping",
-                   f"{len(rows)} registered promoters matched '{location}' in the local registry")
+                   f"{len(rows)} registered promoters matched '{where}' in the local registry")
     n = 0
     for r in rows:
         rec = {
@@ -177,7 +178,7 @@ def _seed_from_registry(store, location, limit, emitter, publish):
 
 def _sweep_maps(args, store, emitter, publish):
     """Query Google Maps (Apify, else browser), publishing each place as it lands."""
-    queries = search_queries(args.location)
+    queries = search_queries(args.location, args.area)
     token = get_apify_token()
     mode = args.source
     got = 0
@@ -200,7 +201,8 @@ def _sweep_maps(args, store, emitter, publish):
     if mode in ("auto", "apify") and not _stopping():
         if token:
             emitter.status("apify", "starting",
-                           f"Apify sweep — {len(queries)} query phrasings for {args.location}")
+                           f"Apify sweep — {len(queries)} query phrasings for "
+                           f"{args.area + ', ' if args.area else ''}{args.location}")
             try:
                 records = apify.fetch(queries, args.max_results, token)
                 used_apify = True
@@ -257,7 +259,8 @@ def run_search(args, emitter):
     """
     store = LeadStore(args.db)
     os.makedirs(args.output_dir, exist_ok=True)
-    csv_path = _csv_path(args.output_dir, args.location, _now_stamp())
+    label = f"{args.area}-{args.location}" if args.area else args.location
+    csv_path = _csv_path(args.output_dir, label, _now_stamp())
 
     live = {}      # company id -> latest record, the single source of truth
     dropped = {"n": 0}
@@ -301,8 +304,8 @@ def run_search(args, emitter):
                                "local RERA registry is empty — run a harvest to enable "
                                "RERA verification and project counts")
             else:
-                _seed_from_registry(store, args.location, args.max_results * 3,
-                                    emitter, publish)
+                _seed_from_registry(store, args.location, args.area,
+                                    args.max_results * 3, emitter, publish)
                 emitter.progress(len(live))
 
         # 2. Contacts from Google Maps.
@@ -388,7 +391,10 @@ def _summarize(leads):
 def main(argv=None):
     p = argparse.ArgumentParser(description="Real-estate builder lead scraper")
     p.add_argument("--mode", choices=["search", "harvest"], default="search")
-    p.add_argument("--location", default="", help="City/district, e.g. 'Pune'")
+    p.add_argument("--location", default="", help="District, e.g. 'Pune'")
+    p.add_argument("--area", default="",
+                   help="Taluka/locality or 6-digit pincode within the district, "
+                        "e.g. 'Haveli' or '411057'")
     p.add_argument("--max-results", type=int, default=100)
     p.add_argument("--source", choices=["auto", "apify", "browser"], default="auto")
     p.add_argument("--db", default=None, help="SQLite path (default data/leads.db)")

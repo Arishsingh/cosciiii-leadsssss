@@ -11,7 +11,7 @@
 <body>
 
 <header class="topbar">
-  <div class="brand">Builder Leads <span>Maharashtra</span></div>
+  <div class="brand">Builder Leads <span id="brandStates"></span></div>
   <div class="spacer"></div>
   <button class="registry" id="registryBtn" title="MahaRERA registry status">
     <span class="dot" id="registryDot"></span>
@@ -22,8 +22,16 @@
 
 <section class="searchbar">
   <div class="field location">
-    <label for="location">Location</label>
-    <input id="location" type="text" placeholder="Pune, Nagpur, Thane…" autocomplete="off" />
+    <label for="location">District / city</label>
+    <input id="location" type="text" placeholder="Pune, Thane, Bengaluru…"
+           list="districtList" autocomplete="off" />
+    <datalist id="districtList"></datalist>
+  </div>
+  <div class="field area">
+    <label for="area">Area <span class="opt">optional</span></label>
+    <input id="area" type="text" placeholder="Haveli, Andheri or 411057"
+           list="areaList" autocomplete="off" />
+    <datalist id="areaList"></datalist>
   </div>
   <div class="field count">
     <label for="maxResults">Builders</label>

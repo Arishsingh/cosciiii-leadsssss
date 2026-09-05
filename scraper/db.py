@@ -13,12 +13,13 @@ strong; a fuzzy name is only trusted when the geography already agrees.
 
 import json
 import os
+import re
 import sqlite3
 import time
 
 from normalize import (
+    key_similarity,
     name_key,
-    name_similarity,
     norm_city,
     norm_domain,
     norm_phone,
@@ -254,7 +255,10 @@ class LeadStore:
         for row in candidates:
             if not _same_place(row, pin, city):
                 continue
-            if name_similarity(rec.get("name"), row["name"]) >= FUZZY_THRESHOLD:
+            # Compare stored keys rather than re-normalizing both names, and let
+            # the length bound reject hopeless pairs before difflib runs.
+            other = row["name_key"] or name_key(row["name"])
+            if key_similarity(key, other, threshold=FUZZY_THRESHOLD) >= FUZZY_THRESHOLD:
                 return row
         return None
 
@@ -369,7 +373,22 @@ class LeadStore:
             ),
         )
 
-    def rera_promoters(self, district=None, limit=None):
+    def rera_areas(self, district=None):
+        """Talukas/localities available for a district, busiest first.
+
+        These are what the registry actually records (Haveli, Mulshi, Andheri,
+        Kalyan), so offering them as suggestions beats letting the user guess.
+        """
+        sql = ("SELECT locality, COUNT(*) n FROM rera_projects"
+               " WHERE locality <> ''")
+        args = []
+        if district:
+            sql += " AND UPPER(district) LIKE ?"
+            args.append(f"%{district.upper()}%")
+        sql += " GROUP BY locality ORDER BY n DESC"
+        return [(r["locality"], r["n"]) for r in self.conn.execute(sql, args).fetchall()]
+
+    def rera_promoters(self, district=None, area=None, limit=None):
         """Promoters aggregated from the cached projects, busiest first.
 
         One row per promoter with their project count — the count is the single
@@ -393,6 +412,18 @@ class LeadStore:
                     " OR UPPER(locality) LIKE ? OR UPPER(state) LIKE ?)")
             like = f"%{district.upper()}%"
             args += [like, like, like, like]
+        # `area` narrows within the district. It accepts a taluka/locality name
+        # or a 6-digit pincode, because both are recorded per project and users
+        # reach for whichever they know.
+        if area:
+            a = area.strip()
+            if re.fullmatch(r"\d{6}", a):
+                sql += " AND pincode = ?"
+                args.append(a)
+            else:
+                sql += " AND (UPPER(locality) LIKE ? OR UPPER(division) LIKE ?)"
+                args += [f"%{a.upper()}%", f"%{a.upper()}%"]
+
         sql += " GROUP BY name_key ORDER BY active_projects DESC, promoter_name"
         if limit:
             sql += f" LIMIT {int(limit)}"
@@ -401,7 +432,7 @@ class LeadStore:
         # A city in a registry that publishes no district finds nothing above.
         # Fall back to that city's state rather than returning an empty list,
         # since "Bengaluru" is what a user actually types.
-        if not rows and district:
+        if not rows and district and not area:
             state = _CITY_TO_STATE.get(district.strip().upper())
             if state:
                 return self.rera_promoters(district=state, limit=limit)

@@ -75,7 +75,14 @@ production use.
 1. Open **registry** in the top bar and press **Harvest registry**.
    ~2.5s per page; 200 pages ≈ 8 minutes, the full 1249 ≈ 50 minutes.
    Do this once — every later search then reads it locally and returns instantly.
-2. Type a location and a count, press **Find builders**.
+2. Type a **district/city**, optionally narrow with an **area**, set a count,
+   press **Find builders**.
+
+Both fields suggest real values from the registry. **Area** accepts a
+taluka/locality (`Haveli`, `Andheri`, `Kalyan`) or a **6-digit pincode**
+(`411057`), and it narrows both the registry lookup and the Google Maps query
+("builders in Haveli, Pune"). Typical effect for Pune: 2,263 promoters
+district-wide, 1,338 in Haveli, 342 in Mulshi, 137 for pincode 411057.
 
 Export with **Export CSV** (all 23 columns, for a CRM or spreadsheet) or
 **Export PDF** (a landscape report with a stats header, ranked table and page
@@ -102,6 +109,8 @@ python scraper/scraper.py --mode harvest --state ka                   # Karnatak
 
 # search
 python scraper/scraper.py --mode search --location Pune --max-results 200
+python scraper/scraper.py --mode search --location Pune --area Haveli
+python scraper/scraper.py --mode search --location Pune --area 411057
 python scraper/scraper.py --mode search --location Thane --only-verified-email
 ```
 

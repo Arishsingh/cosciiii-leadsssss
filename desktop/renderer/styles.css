@@ -204,7 +204,9 @@ select { cursor: pointer; }
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.field.location { flex: 1; min-width: 180px; }
+.field.location { flex: 1.15; min-width: 150px; }
+.field.area     { flex: 1; min-width: 130px; }
+.field label .opt { color: var(--text-3); text-transform: none; letter-spacing: 0; font-weight: 400; }
 .field.count  { width: 96px; }
 .field.source { width: 158px; }
 .searchbar .go { display: flex; gap: 8px; }

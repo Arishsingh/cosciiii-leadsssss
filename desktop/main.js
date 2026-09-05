@@ -90,6 +90,9 @@ function startScrape(_evt, opts) {
     if (opts.delay) args.push("--delay", String(opts.delay));
   } else {
     args.push("--location", String(opts.location || ""));
+    if (opts.area && String(opts.area).trim()) {
+      args.push("--area", String(opts.area).trim());
+    }
     args.push("--max-results", String(opts.maxResults || 100));
     const source = ["auto", "apify", "browser"].includes(opts.source) ? opts.source : "auto";
     args.push("--source", source);

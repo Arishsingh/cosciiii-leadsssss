@@ -48,8 +48,15 @@ _BUILDER_WORDS = [
 _BUILDER_RE = re.compile("|".join(re.escape(w) for w in _BUILDER_WORDS), re.I)
 
 
-def search_queries(location):
-    return [t.format(location=location) for t in SEARCH_TEMPLATES]
+def search_queries(location, area=""):
+    """Query strings for a location, narrowed to `area` when one is given.
+
+    Google reads "builders in Wakad, Pune" as the neighbourhood search it is,
+    which is far more targeted than sweeping the whole district and filtering
+    afterwards.
+    """
+    where = f"{area.strip()}, {location}" if (area or "").strip() else location
+    return [t.format(location=where) for t in SEARCH_TEMPLATES]
 
 
 def looks_like_broker(rec):

@@ -22,11 +22,13 @@ def main():
         return 0
     try:
         districts = store.rera_districts()
+        areas = {d: [a for a, _ in store.rera_areas(d)] for d, _ in districts[:40]}
         total_companies = store.conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
         print(json.dumps({
             "ok": True,
             "reraProjects": store.rera_count(),
-            "reraDistricts": [{"name": d, "count": n} for d, n in districts[:40]],
+            "reraDistricts": [{"name": d, "count": n, "areas": areas.get(d, [])}
+                              for d, n in districts[:40]],
             "reraStates": [{"name": st, "count": n} for st, n in store.rera_states()],
             "lastHarvest": store.get_meta("rera_last_harvest", "") or "",
             "companies": total_companies,

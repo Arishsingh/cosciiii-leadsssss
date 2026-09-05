@@ -105,11 +105,30 @@ def name_key(value):
 
 def name_similarity(a, b):
     """0.0-1.0 similarity between two company names, order-independent."""
-    ka, kb = name_key(a), name_key(b)
+    return key_similarity(name_key(a), name_key(b))
+
+
+def key_similarity(ka, kb, threshold=0.0):
+    """Similarity between two *already normalized* name keys.
+
+    Takes keys rather than raw names because callers usually have them stored
+    already, and re-normalizing on every comparison dominated the cost of
+    matching (hundreds of thousands of regex substitutions per run).
+
+    `threshold` enables an exact early exit. SequenceMatcher's ratio is
+    2*M/(len(a)+len(b)) with M <= min(len(a), len(b)), so when
+    2*min/(len_a+len_b) is already below the threshold the pair cannot possibly
+    reach it and the expensive comparison is skipped. This is a bound, not a
+    heuristic: it never changes the outcome.
+    """
     if not ka or not kb:
         return 0.0
     if ka == kb:
         return 1.0
+    if threshold:
+        upper = 2.0 * min(len(ka), len(kb)) / (len(ka) + len(kb))
+        if upper < threshold:
+            return 0.0
     return SequenceMatcher(None, ka, kb).ratio()
 
 
