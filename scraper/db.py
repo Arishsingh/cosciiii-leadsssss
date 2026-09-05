@@ -155,8 +155,17 @@ class LeadStore:
         """
         have = {r["name"] for r in self.conn.execute("PRAGMA table_info(companies)")}
         for col, decl in (("linkedin", "TEXT"),):
-            if col not in have:
+            if col in have:
+                continue
+            try:
                 self.conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError:
+                # ALTER needs an exclusive lock, so it loses to a long-running
+                # writer (a harvest, or a search mid-sweep). Opening the store
+                # must not fail just because a migration could not run right
+                # now: readers degrade gracefully on a missing column, and the
+                # next open with a free database will add it.
+                pass
 
     def close(self):
         try:
