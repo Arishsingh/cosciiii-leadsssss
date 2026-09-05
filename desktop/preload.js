@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("api", {
   openRun: (filePath) => ipcRenderer.invoke("run:open", filePath),
   revealOutput: () => ipcRenderer.invoke("output:reveal"),
   exportFiltered: (rows) => ipcRenderer.invoke("export:filtered", rows),
+  exportPdf: (payload) => ipcRenderer.invoke("export:pdf", payload),
   registryStatus: () => ipcRenderer.invoke("registry:status"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (next) => ipcRenderer.invoke("settings:save", next),

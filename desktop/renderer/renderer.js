@@ -24,7 +24,7 @@ const el = {
   statusMsg: $("statusMsg"), progress: $("progress"),
   onlyEmail: $("onlyEmail"), onlyVerified: $("onlyVerified"),
   keepBrokers: $("keepBrokers"), search: $("search"),
-  showing: $("showing"), exportBtn: $("exportBtn"),
+  showing: $("showing"), exportBtn: $("exportBtn"), exportPdfBtn: $("exportPdfBtn"),
   table: $("leads"), tbody: $("leadsBody"), empty: $("emptyState"),
   detail: $("detail"), detailName: $("detailName"), detailBody: $("detailBody"),
   detailClose: $("detailClose"),
@@ -384,6 +384,36 @@ el.exportBtn.addEventListener("click", async () => {
   const res = await window.api.exportFiltered(rows);
   if (res.ok) log(`Exported ${res.count} leads → ${res.path}`, "done");
   else if (!res.canceled) log(res.error || "Export failed.", "error");
+});
+
+el.exportPdfBtn.addEventListener("click", async () => {
+  const rows = visibleLeads();
+  if (!rows.length) {
+    el.statusMsg.textContent = "Nothing to export.";
+    return;
+  }
+  // Export exactly what is on screen, and record which filters produced it so
+  // the report is self-explanatory once it leaves the app.
+  const filters = [
+    el.onlyEmail.checked && "has email",
+    el.onlyVerified.checked && "verified email only",
+    el.keepBrokers.checked && "brokers included",
+    el.search.value.trim() && `matching "${el.search.value.trim()}"`,
+  ].filter(Boolean).join(", ");
+
+  el.exportPdfBtn.disabled = true;
+  el.exportPdfBtn.textContent = "Building…";
+  try {
+    const res = await window.api.exportPdf({
+      rows,
+      meta: { location: el.location.value.trim(), filters },
+    });
+    if (res.ok) log(`Exported ${res.count} leads → ${res.path}`, "done");
+    else if (!res.canceled) log(res.error || "PDF export failed.", "error");
+  } finally {
+    el.exportPdfBtn.disabled = false;
+    el.exportPdfBtn.textContent = "Export PDF";
+  }
 });
 
 [el.onlyEmail, el.onlyVerified].forEach((n) =>

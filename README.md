@@ -77,6 +77,11 @@ production use.
    Do this once — every later search then reads it locally and returns instantly.
 2. Type a location and a count, press **Find builders**.
 
+Export with **Export CSV** (all 23 columns, for a CRM or spreadsheet) or
+**Export PDF** (a landscape report with a stats header, ranked table and page
+numbers — for sending to someone). Both export exactly what the filters
+currently show, and the PDF records which filters produced it.
+
 The stats strip reports the honest fill rates rather than just a total:
 
 ```

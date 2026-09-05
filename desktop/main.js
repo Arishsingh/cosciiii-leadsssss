@@ -4,6 +4,8 @@ const { app, BrowserWindow, ipcMain, shell, dialog } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
+const { buildHtml } = require("./pdf");
 
 // desktop/ lives inside the repo; the scraper, output/, and config.json are one up.
 const REPO_ROOT = path.join(__dirname, "..");
@@ -260,6 +262,66 @@ function registryStatus() {
   });
 }
 
+// ---- PDF export -------------------------------------------------------------
+
+/** Render the report in an offscreen window and save it as a PDF.
+ *
+ * Uses Electron's own printToPDF rather than a PDF library — Chromium is
+ * already here, so the report is authored in HTML/CSS (see pdf.js). The
+ * offscreen window loads a temp file rather than a data: URL, because a large
+ * lead list exceeds practical URL limits.
+ */
+async function exportPdf(_evt, payload) {
+  const rows = (payload && payload.rows) || [];
+  const meta = (payload && payload.meta) || {};
+  if (!rows.length) return { ok: false, error: "Nothing to export." };
+
+  const suggested = `builder-leads-${(meta.location || "all")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "all"}.pdf`;
+  const res = await dialog.showSaveDialog(win, {
+    title: "Save leads as PDF",
+    defaultPath: path.join(OUTPUT_DIR, suggested),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+
+  const tmp = path.join(os.tmpdir(), `builder-leads-${Date.now()}.html`);
+  let sheet = null;
+  try {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+    fs.writeFileSync(tmp, buildHtml(rows, meta), "utf-8");
+
+    sheet = new BrowserWindow({
+      show: false,
+      webPreferences: { offscreen: true, javascript: false, sandbox: true },
+    });
+    await sheet.loadFile(tmp);
+
+    const pdf = await sheet.webContents.printToPDF({
+      landscape: true,
+      printBackground: true,
+      // The stylesheet declares @page, so honour it instead of overriding.
+      preferCSSPageSize: true,
+      displayHeaderFooter: true,
+      headerTemplate: "<div></div>",
+      footerTemplate:
+        '<div style="width:100%;font-size:7pt;color:#8b93a1;padding:0 10mm;' +
+        'font-family:-apple-system,Helvetica,Arial,sans-serif;display:flex;' +
+        'justify-content:space-between;">' +
+        "<span>Builder Leads</span>" +
+        '<span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>' +
+        "</div>",
+    });
+    fs.writeFileSync(res.filePath, pdf);
+    return { ok: true, path: res.filePath, count: rows.length };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  } finally {
+    if (sheet && !sheet.isDestroyed()) sheet.destroy();
+    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+  }
+}
+
 // ---- settings ---------------------------------------------------------------
 
 function getSettings() {
@@ -297,6 +359,7 @@ app.whenReady().then(() => {
   ipcMain.handle("run:open", openRun);
   ipcMain.handle("output:reveal", revealOutput);
   ipcMain.handle("export:filtered", exportFiltered);
+  ipcMain.handle("export:pdf", exportPdf);
   ipcMain.handle("registry:status", registryStatus);
   ipcMain.handle("settings:get", getSettings);
   ipcMain.handle("settings:save", saveSettings);
