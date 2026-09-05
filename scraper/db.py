@@ -373,13 +373,32 @@ class LeadStore:
         )
         args = []
         if district:
-            sql += " AND (UPPER(district) LIKE ? OR UPPER(division) LIKE ? OR UPPER(locality) LIKE ?)"
+            # State is included because some registries (Karnataka) publish no
+            # district at all, so "Karnataka" or "Bengaluru" must still resolve.
+            sql += (" AND (UPPER(district) LIKE ? OR UPPER(division) LIKE ?"
+                    " OR UPPER(locality) LIKE ? OR UPPER(state) LIKE ?)")
             like = f"%{district.upper()}%"
-            args += [like, like, like]
+            args += [like, like, like, like]
         sql += " GROUP BY name_key ORDER BY active_projects DESC, promoter_name"
         if limit:
             sql += f" LIMIT {int(limit)}"
-        return self.conn.execute(sql, args).fetchall()
+        rows = self.conn.execute(sql, args).fetchall()
+
+        # A city in a registry that publishes no district finds nothing above.
+        # Fall back to that city's state rather than returning an empty list,
+        # since "Bengaluru" is what a user actually types.
+        if not rows and district:
+            state = _CITY_TO_STATE.get(district.strip().upper())
+            if state:
+                return self.rera_promoters(district=state, limit=limit)
+        return rows
+
+    def rera_states(self):
+        rows = self.conn.execute(
+            "SELECT state, COUNT(*) n FROM rera_projects WHERE state <> ''"
+            " GROUP BY state ORDER BY n DESC"
+        ).fetchall()
+        return [(r["state"], r["n"]) for r in rows]
 
     def rera_count(self):
         return self.conn.execute("SELECT COUNT(*) FROM rera_projects").fetchone()[0]
@@ -410,6 +429,18 @@ _SHARED_HOSTS = {
     "indiamart.com", "justdial.com", "sulekha.com", "facebook.com",
     "instagram.com", "linkedin.com", "google.com", "sites.google.com",
     "wixsite.com", "blogspot.com", "wordpress.com", "business.site",
+}
+
+
+# Cities whose registry publishes no district, so a city search has to resolve
+# to the state. Only needed for registries like K-RERA that omit district
+# entirely — Maharashtra rows carry a real district and never reach this.
+_CITY_TO_STATE = {
+    "BENGALURU": "KARNATAKA", "BANGALORE": "KARNATAKA", "BLR": "KARNATAKA",
+    "MYSURU": "KARNATAKA", "MYSORE": "KARNATAKA", "MANGALURU": "KARNATAKA",
+    "MANGALORE": "KARNATAKA", "HUBLI": "KARNATAKA", "HUBBALLI": "KARNATAKA",
+    "BELAGAVI": "KARNATAKA", "BELGAUM": "KARNATAKA", "DHARWAD": "KARNATAKA",
+    "TUMAKURU": "KARNATAKA", "SHIVAMOGGA": "KARNATAKA",
 }
 
 

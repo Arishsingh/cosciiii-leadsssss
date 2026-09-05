@@ -78,13 +78,24 @@ def _csv_path(output_dir, location, stamp):
 
 # ------------------------------------------------------------------ harvest
 
+# Each state publishes its registry differently; the orchestrator only needs a
+# module exposing harvest(...) that yields project dicts.
+STATE_SOURCES = {
+    "mh": ("MahaRERA (Maharashtra)", "sources.rera"),
+    "ka": ("K-RERA (Karnataka)", "sources.rera_ka"),
+}
+
+
 def run_harvest(args, emitter):
-    """Bulk-load the MahaRERA registry into SQLite."""
-    from sources import rera
+    """Bulk-load a state RERA registry into SQLite."""
+    import importlib
+
+    label, module = STATE_SOURCES.get(args.state, STATE_SOURCES["mh"])
+    rera = importlib.import_module(module)
 
     store = LeadStore(args.db)
     emitter.status("rera", "starting",
-                   "harvesting the MahaRERA registry — this is a one-off bulk load")
+                   f"harvesting {label} — this is a one-off bulk load")
     n = 0
     try:
         def on_page(page, count):
@@ -108,9 +119,9 @@ def run_harvest(args, emitter):
         store.set_meta("rera_last_harvest", _now_stamp())
         store.set_meta("rera_projects", store.rera_count())
         total = store.rera_count()
+        states = ", ".join(f"{st.title()} {n}" for st, n in store.rera_states())
         emitter.status("rera", "done",
-                       f"registry now holds {total} projects "
-                       f"({len(store.rera_districts())} districts)")
+                       f"registry now holds {total} projects across {states}")
         emitter.done(n, "")
     except Exception as e:  # noqa: BLE001 — surface any failure as an event
         store.commit()
@@ -385,6 +396,8 @@ def main(argv=None):
     p.add_argument("--delay", type=float, default=0.6, help="harvest: seconds between pages")
     p.add_argument("--start-page", type=int, default=1,
                    help="harvest: resume from this page instead of the first")
+    p.add_argument("--state", choices=sorted(STATE_SOURCES), default="mh",
+                   help="harvest: which state registry to load")
     p.add_argument("--no-rera", action="store_true", help="skip the RERA registry spine")
     p.add_argument("--no-enrich", action="store_true", help="skip website email discovery")
     p.add_argument("--no-verify", action="store_true", help="skip MX verification")

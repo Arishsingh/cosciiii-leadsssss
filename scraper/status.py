@@ -27,6 +27,7 @@ def main():
             "ok": True,
             "reraProjects": store.rera_count(),
             "reraDistricts": [{"name": d, "count": n} for d, n in districts[:40]],
+            "reraStates": [{"name": st, "count": n} for st, n in store.rera_states()],
             "lastHarvest": store.get_meta("rera_last_harvest", "") or "",
             "companies": total_companies,
         }))
