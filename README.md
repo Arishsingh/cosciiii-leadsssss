@@ -20,7 +20,8 @@ Three sources, merged into one company record:
 
 | Source | Supplies | Cost |
 |---|---|---|
-| **MahaRERA registry** | registration no., promoter name, district, **project count** | free |
+| **MahaRERA registry** (Maharashtra) | registration no., promoter name, district, **project count** | free |
+| **K-RERA registry** (Karnataka) | registration no., promoter name, **project count** (no district published) | free |
 | **Google Maps** (Apify actor, or Playwright fallback) | phone, website, address, rating, sometimes email | Apify usage |
 | **Website crawl** (`enrich.py`) | the email, from the company's own contact page | free |
 
@@ -90,8 +91,9 @@ without verification, which will get your sending domain blacklisted.
 ## CLI
 
 ```bash
-# bulk-load the registry
-python scraper/scraper.py --mode harvest --max-pages 200
+# bulk-load a state registry
+python scraper/scraper.py --mode harvest --state mh --max-pages 200   # Maharashtra, ~1hr
+python scraper/scraper.py --mode harvest --state ka                   # Karnataka, ~20s
 
 # search
 python scraper/scraper.py --mode search --location Pune --max-results 200
@@ -142,6 +144,25 @@ Results are ranked by it, so a capped search returns the *best* N, not an
 arbitrary N.
 
 ---
+
+## Sources tested and rejected
+
+Checked directly rather than assumed, so they are not worth re-testing:
+
+| Source | Result |
+|---|---|
+| 99acres, Zauba Corp | HTTP 403 |
+| Justdial | 200 with an empty body (blocked) |
+| IndiaMART, MagicBricks | 404 on category URLs |
+| CREDAI Maharashtra chapters | members area is login-gated |
+| Telangana RERA | search form is CAPTCHA-gated |
+| Goa RERA | publishes only negative lists (cancelled/withdrawn) and aggregate counts |
+| LinkedIn (direct) | needs proxies/throwaway accounts to evade blocking; not attempted |
+
+LinkedIn URLs are instead read from the builders' own websites during the
+enrichment crawl (~32% hit rate). Lifting that materially would mean a paid
+search API (SerpAPI/Bing/Google CSE) querying
+`site:linkedin.com/company "<builder>"`.
 
 ## Legal note
 

@@ -67,6 +67,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_rera  ON companies(rera_number) 
 CREATE INDEX IF NOT EXISTS idx_companies_phone  ON companies(phone_norm);
 CREATE INDEX IF NOT EXISTS idx_companies_domain ON companies(domain);
 CREATE INDEX IF NOT EXISTS idx_companies_namekey ON companies(name_key);
+-- Support the geography-gated candidate lookup in find_match without a scan.
+CREATE INDEX IF NOT EXISTS idx_companies_pin  ON companies(postal_code);
+CREATE INDEX IF NOT EXISTS idx_companies_city ON companies(city);
 
 CREATE TABLE IF NOT EXISTS company_sources (
     company_id  INTEGER NOT NULL,
@@ -225,17 +228,28 @@ class LeadStore:
         if not pin and not city:
             return None
 
-        # Exact normalized-name hits first, then near hits, both geo-gated.
+        # Exact normalized-name hits first — `name_key` is indexed, and
+        # normalization already collapses "M/s. Kumar Builders Pvt. Ltd." and
+        # "KUMAR DEVELOPERS" onto the same key, so this catches most pairs.
         candidates = cur.execute(
             "SELECT * FROM companies WHERE name_key = ?", (key,)
         ).fetchall()
         if not candidates:
-            # Widen only to names sharing a first token — keeps the scan small.
-            first = key.split(" ")[0]
-            candidates = cur.execute(
-                "SELECT * FROM companies WHERE name_key LIKE ? LIMIT 400",
-                (f"%{first}%",),
-            ).fetchall()
+            # Widen by *geography*, not by name substring. `name_key LIKE
+            # '%token%'` cannot use an index, so it scanned the whole table for
+            # every unmatched record — O(n) per row, O(n^2) per run, which made
+            # a 600-row search take 15s once the table reached a few thousand
+            # companies. Pincode and city are indexed and far more selective.
+            if pin:
+                candidates = cur.execute(
+                    "SELECT * FROM companies WHERE postal_code = ? LIMIT 400", (pin,)
+                ).fetchall()
+            elif city:
+                candidates = cur.execute(
+                    "SELECT * FROM companies WHERE city = ? LIMIT 400", (city,)
+                ).fetchall()
+            else:
+                candidates = []
 
         for row in candidates:
             if not _same_place(row, pin, city):
