@@ -44,7 +44,9 @@ const el = {
 };
 
 let leads = [];          // every lead from the current run, in arrival order
+const byId = new Map();  // company id -> index in `leads`, for in-place updates
 let selected = null;     // index into `leads`
+let pending = false;     // a render is already queued for the next frame
 let running = false;
 let mode = "search";
 let logCount = 0;
@@ -129,6 +131,18 @@ function visibleLeads() {
     if (!q) return true;
     return ["name", "city", "district", "email", "phone", "rera_number", "promoter_name", "linkedin"]
       .some((f) => String(l[f] ?? "").toLowerCase().includes(q));
+  });
+}
+
+/* Results stream in bursts, and re-rendering the table per row would spend the
+   whole run in layout. Coalescing into one render per animation frame keeps the
+   UI responsive no matter how fast rows arrive. */
+function scheduleRender() {
+  if (pending) return;
+  pending = true;
+  requestAnimationFrame(() => {
+    pending = false;
+    renderTable();
   });
 }
 
@@ -254,9 +268,19 @@ window.api.onEvent((evt) => {
       el.statusMsg.textContent = `${evt.found} found…`;
       break;
     case "lead": {
-      const before = leads.length;
-      leads.push(evt.data);
-      renderTable(before);
+      // Rows arrive more than once: a promoter published from the registry is
+      // republished when the Maps sweep or enrichment fills in its contacts.
+      // Keying on the company id updates that row in place instead of
+      // appending a duplicate.
+      const d = evt.data;
+      const key = d.id;
+      if (key !== undefined && byId.has(key)) {
+        leads[byId.get(key)] = d;
+      } else {
+        if (key !== undefined) byId.set(key, leads.length);
+        leads.push(d);
+      }
+      scheduleRender();
       break;
     }
     case "stats":
@@ -264,6 +288,15 @@ window.api.onEvent((evt) => {
       break;
     case "done":
       setPhase("score", "done");
+      // Rank only now. Sorting while rows stream in would make them jump under
+      // the cursor; during the run, arrival order is already useful because the
+      // registry publishes the biggest developers first.
+      leads.sort((a, b) => (b.lead_score || 0) - (a.lead_score || 0) ||
+                           String(a.name || "").localeCompare(String(b.name || "")));
+      byId.clear();
+      leads.forEach((l, i) => { if (l.id !== undefined) byId.set(l.id, i); });
+      selected = null;
+      renderTable();
       if (mode === "harvest") {
         log(`Harvest complete — ${evt.total} projects.`, "done");
         refreshRegistry();
@@ -296,6 +329,7 @@ el.start.addEventListener("click", async () => {
   }
   mode = "search";
   leads = [];
+  byId.clear();
   selected = null;
   el.detail.hidden = true;
   el.stats.classList.remove("show");

@@ -18,6 +18,7 @@ mailing unverified guesses is the fastest way to burn a sending domain.
 """
 
 import re
+import threading
 import time
 
 import requests
@@ -28,6 +29,9 @@ UA = (
 )
 
 # Pages worth trying, in the order they most often carry an address.
+# Ordered by how often each carries contact details. The crawl stops as soon as
+# it has what it needs, so the later paths are only paid for when the homepage
+# came up empty.
 CONTACT_PATHS = ["", "/contact", "/contact-us", "/contactus", "/about", "/about-us", "/reach-us"]
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
@@ -49,6 +53,13 @@ _GENERIC_LOCALS = {
 }
 
 _DOH = "https://cloudflare-dns.com/dns-query"
+
+# MX answers are per-domain and stable, and many builders share a provider
+# (gmail.com alone covers a large slice of Indian SME contacts). Caching turns
+# one lookup per lead into one per distinct domain. Guarded because enrichment
+# runs across a thread pool.
+_MX_CACHE = {}
+_MX_LOCK = threading.Lock()
 
 
 def clean_emails(text, prefer_domain=""):
@@ -96,9 +107,22 @@ def has_mx(domain, timeout=6):
     DoH is used rather than a DNS library so the app needs no extra dependency
     and behaves the same on macOS and Windows. Returns None when the check
     itself fails, so callers can tell "no mail server" from "couldn't check".
+    Results are cached per domain for the life of the process.
     """
     if not domain:
         return None
+    with _MX_LOCK:
+        if domain in _MX_CACHE:
+            return _MX_CACHE[domain]
+    result = _has_mx_uncached(domain, timeout)
+    # Only cache a definite answer; a failed check should be retried later.
+    if result is not None:
+        with _MX_LOCK:
+            _MX_CACHE[domain] = result
+    return result
+
+
+def _has_mx_uncached(domain, timeout=6):
     try:
         r = requests.get(
             _DOH,
@@ -116,7 +140,49 @@ def has_mx(domain, timeout=6):
     return any(a.get("type") == 15 for a in data.get("Answer", []))
 
 
-def crawl_site(website, timeout=12, max_pages=4, delay=0.3, session=None):
+def enrich_many(records, verify_mx=True, workers=10, on_result=None, should_stop=None):
+    """Enrich records concurrently, yielding each as it completes.
+
+    Enrichment is almost entirely network wait — several page fetches plus a DNS
+    lookup per company — so running it serially made it the slowest stage of a
+    search by a wide margin. A thread pool turns it into roughly one company's
+    latency for the whole batch.
+
+    Only the network happens here. Database writes stay with the caller on the
+    main thread, because a SQLite connection may not be shared across threads.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not records:
+        return
+
+    def work(item):
+        key, rec = item
+        if should_stop and should_stop():
+            return key, rec
+        # requests.Session is not thread-safe, so each task gets its own.
+        with requests.Session() as sess:
+            try:
+                enrich_record(rec, verify_mx=verify_mx, session=sess)
+            except Exception:  # noqa: BLE001 — one bad site never fails the batch
+                pass
+        return key, rec
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futures = [ex.submit(work, item) for item in records]
+        for fut in as_completed(futures):
+            if should_stop and should_stop():
+                break
+            try:
+                key, rec = fut.result()
+            except Exception:  # noqa: BLE001
+                continue
+            if on_result:
+                on_result(key, rec)
+            yield key, rec
+
+
+def crawl_site(website, timeout=8, max_pages=3, delay=0.0, session=None):
     """Fetch a company's site and return {"emails": [...], "linkedin": [...]}.
 
     One crawl serves both: the LinkedIn URL is almost always a footer social

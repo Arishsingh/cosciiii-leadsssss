@@ -91,6 +91,29 @@ Facts that span multiple files:
   — only a `hasToken` boolean. `main.js` shells out to `scraper/status.py` for
   registry stats because the main process has no SQLite driver.
 
+- **`publish()` in `run_search` must never write to the database.** Scores are
+  held in memory and persisted once at the end. This is a performance
+  invariant, not a style choice: when it called `set_score` per row, a search
+  running alongside a registry harvest took ~9.9s to show its first builder
+  because the very first UI row blocked on the write lock. Write-free, it is
+  ~0.11s under the same contention.
+
+- **Streaming order is deliberate.** The registry publishes first (local,
+  instant, biggest developers first), Maps republishes those same rows with
+  contacts, and enrichment republishes again. Every row carries its company
+  `id`; the renderer keys on it to update in place, so a promoter enriched
+  later does not appear twice. Ranking happens once, on `done` — sorting live
+  would make rows jump under the cursor.
+
+- **Long-running writers commit incrementally.** sqlite3 holds a write
+  transaction from the first INSERT until `commit()`, so both the harvest (per
+  page) and the Maps sweep (every 10 records) commit as they go. Batching them
+  larger reintroduces multi-second stalls for anything else touching the file.
+
+- **Enrichment is concurrent** (`enrich.enrich_many`, default 10 workers) and
+  does network only — SQLite writes stay on the calling thread, because a
+  connection cannot be shared across threads. MX results are cached per domain.
+
 - **A stop is cooperative**: SIGTERM sets `_STOP`, the loops exit, the CSV is
   flushed, and main.js escalates to killing the process *group* after 4s
   (the child is `detached` so Chromium dies with it).

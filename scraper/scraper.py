@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import get_apify_token
 from db import LeadStore
-from enrich import enrich_record
+from enrich import enrich_many
 from events import CsvWriter, Emitter
 from mapping import COLUMNS, map_record
 from scoring import score_lead
@@ -97,7 +97,11 @@ def run_harvest(args, emitter):
                                 start_page=args.start_page):
             store.upsert_rera_project(row)
             n += 1
-            if n % 50 == 0:
+            # Commit every page rather than every fifth. A harvest runs for the
+            # best part of an hour, and sqlite3 holds a write transaction open
+            # until commit(), so a longer batch means any search running
+            # alongside it waits seconds for its first write.
+            if n % 10 == 0:
                 store.commit()
                 emitter.progress(n)
         store.commit()
@@ -122,12 +126,14 @@ def run_harvest(args, emitter):
 
 # ------------------------------------------------------------------- search
 
-def _seed_from_registry(store, location, limit, emitter, seen_ids):
-    """Insert cached RERA promoters for `location` as the spine of the search.
+def _seed_from_registry(store, location, limit, emitter, publish):
+    """Insert cached RERA promoters for `location`, publishing each immediately.
 
-    Collects the resulting company ids directly rather than re-querying for
-    them afterwards — `upsert` already returns the id it wrote to, including
-    when it merged into a company an earlier source created.
+    This is the fast path and the reason a search feels instant: the registry is
+    local, so names, registration numbers and project counts are available in
+    well under a second. They are streamed straight out rather than held back
+    until the network stages finish. Promoters arrive busiest-first, so the
+    largest developers are on screen first.
     """
     rows = store.rera_promoters(district=location, limit=limit)
     if not rows:
@@ -150,16 +156,16 @@ def _seed_from_registry(store, location, limit, emitter, seen_ids):
             "category": "Registered promoter (MahaRERA)",
         }
         cid, _ = store.upsert(rec, "rera", r["rera_number"])
-        seen_ids.add(cid)
+        publish(cid)
         n += 1
         if n % 100 == 0:
-            store.commit()  # keep the write lock short-lived, as above
+            store.commit()  # keep the write lock short-lived
     store.commit()
     return n
 
 
-def _sweep_maps(args, store, emitter, seen_ids):
-    """Query Google Maps (Apify, else browser) and merge results into the store."""
+def _sweep_maps(args, store, emitter, publish):
+    """Query Google Maps (Apify, else browser), publishing each place as it lands."""
     queries = search_queries(args.location)
     token = get_apify_token()
     mode = args.source
@@ -171,15 +177,13 @@ def _sweep_maps(args, store, emitter, seen_ids):
         if not (lead.get("name") or "").strip():
             return
         cid, _ = store.upsert(lead, source, lead.get("google_maps_url", ""))
-        seen_ids.add(cid)
         got += 1
         if got % 10 == 0:
-            # Commit as we go, not just at the end. Python's sqlite3 holds a
-            # write transaction open from the first INSERT until commit(), so
-            # batching the whole sweep into one transaction would lock the
-            # database for minutes and block a concurrent registry harvest.
+            # Commit as we go: sqlite3 holds a write transaction open from the
+            # first INSERT until commit(), so one big transaction would lock the
+            # database for the whole sweep and block a concurrent harvest.
             store.commit()
-            emitter.progress(len(seen_ids))
+        publish(cid)
 
     used_apify = False
     if mode in ("auto", "apify") and not _stopping():
@@ -231,13 +235,55 @@ def _sweep_maps(args, store, emitter, seen_ids):
 
 
 def run_search(args, emitter):
+    """Produce a ranked builder list, streaming results as they become known.
+
+    Ordering of the stages is deliberate. The registry is read first because it
+    is local and instant, so the user sees real builder names immediately rather
+    than watching a spinner through the network stages. Maps records then land
+    on top of those already-identified promoters and inherit their registration
+    numbers. Enrichment runs last and concurrently, republishing rows in place
+    as contacts arrive.
+    """
     store = LeadStore(args.db)
     os.makedirs(args.output_dir, exist_ok=True)
     csv_path = _csv_path(args.output_dir, args.location, _now_stamp())
-    seen_ids = set()
+
+    live = {}      # company id -> latest record, the single source of truth
+    dropped = {"n": 0}
+
+    def snapshot(cid):
+        row = store.get(cid)
+        if row is None:
+            return None
+        return {c: row[c] for c in COLUMNS if c in row.keys()}
+
+    def publish(cid, rec=None):
+        """Score a company and stream it to the UI, replacing any earlier copy.
+
+        Every row carries its company id so the renderer updates in place: a
+        Maps sweep enriching a promoter already on screen must not append a
+        second row for the same firm.
+
+        Deliberately does no database write. Scores are held in memory and
+        persisted once at the end: making the UI wait on a write lock meant that
+        while a registry harvest was running, the first row took ten seconds to
+        appear instead of a sixth of one.
+        """
+        rec = rec or snapshot(cid)
+        if rec is None:
+            return
+        if not args.keep_brokers and looks_like_broker(rec):
+            if cid not in live:
+                dropped["n"] += 1
+            return
+        score, _ = score_lead(rec)
+        rec["lead_score"] = score
+        rec["id"] = cid
+        live[cid] = rec
+        emitter.lead(rec)
 
     try:
-        # 1. Registry spine — free, instant, and the source of the builder proof.
+        # 1. Registry spine — instant, and the source of the builder proof.
         if not args.no_rera:
             if store.rera_count() == 0:
                 emitter.status("rera", "fallback",
@@ -245,73 +291,46 @@ def run_search(args, emitter):
                                "RERA verification and project counts")
             else:
                 _seed_from_registry(store, args.location, args.max_results * 3,
-                                    emitter, seen_ids)
-                emitter.progress(len(seen_ids))
+                                    emitter, publish)
+                emitter.progress(len(live))
 
         # 2. Contacts from Google Maps.
         if not _stopping():
-            _sweep_maps(args, store, emitter, seen_ids)
+            _sweep_maps(args, store, emitter, publish)
+            emitter.progress(len(live))
 
-        # 3. Materialize, filter, enrich, score.
-        emitter.status("-", "scraping", f"merging and scoring {len(seen_ids)} candidates…")
-        leads, dropped = [], 0
-        for cid in seen_ids:
-            row = store.get(cid)
-            if row is None:
-                continue
-            rec = {c: row[c] for c in COLUMNS if c in row.keys()}
-            if not args.keep_brokers and looks_like_broker(rec):
-                dropped += 1
-                continue
-            leads.append((cid, rec))
-
-        if dropped:
+        if dropped["n"]:
             emitter.status("-", "scraping",
-                           f"filtered out {dropped} broker / supplier listings")
+                           f"filtered out {dropped['n']} broker / supplier listings")
 
-        # Enrichment is the slow, networked step, so it runs only on records
-        # that lack an email and actually have a site to read.
-        # Anything with a site but a gap in either contact field is worth a crawl;
-        # one fetch fills both.
-        need = [(cid, r) for cid, r in leads
-                if (r.get("website") or "").strip()
-                and not ((r.get("email") or "").strip() and (r.get("linkedin") or "").strip())]
+        # 3. Enrichment: concurrent, and republishing rows in place as it goes.
+        need = [(cid, dict(rec)) for cid, rec in live.items()
+                if (rec.get("website") or "").strip()
+                and not ((rec.get("email") or "").strip() and (rec.get("linkedin") or "").strip())]
         if need and not args.no_enrich:
             emitter.status("enrich", "starting",
-                           f"looking for emails on {len(need)} company websites…")
-            import requests as _rq
-            sess = _rq.Session()
-            for i, (cid, rec) in enumerate(need, 1):
-                if _stopping():
-                    break
-                try:
-                    enrich_record(rec, verify_mx=not args.no_verify, session=sess)
-                except Exception:  # noqa: BLE001 — one bad site never aborts a run
-                    continue
+                           f"looking for emails and LinkedIn on {len(need)} sites…")
+            done = 0
+            for cid, rec in enrich_many(need, verify_mx=not args.no_verify,
+                                        workers=args.enrich_workers,
+                                        should_stop=_stopping):
+                done += 1
                 if rec.get("email") or rec.get("linkedin"):
-                    store.upsert({**rec, "name": rec["name"]}, "enrich")
-                if i % 5 == 0:
+                    store.upsert(rec, "enrich")
+                    publish(cid)
+                if done % 10 == 0:
                     store.commit()
-                    emitter.status("enrich", "scraping", f"{i}/{len(need)} sites checked")
+                    emitter.status("enrich", "scraping", f"{done}/{len(need)} sites checked")
             store.commit()
 
-        # Re-read so scores reflect everything the merge and enrichment wrote.
-        final = []
-        for cid, _ in leads:
-            row = store.get(cid)
-            if row is None:
-                continue
-            rec = {c: row[c] for c in COLUMNS if c in row.keys()}
-            score, reasons = score_lead(rec)
-            rec["lead_score"] = score
-            store.set_score(cid, score)
-            rec["_reasons"] = reasons
-            final.append(rec)
+        # 4. Rank and export. Best first, so a capped export is the top N.
+        # Persist the scores now, in one transaction, rather than once per row
+        # during streaming.
+        for cid, rec in live.items():
+            store.set_score(cid, rec["lead_score"])
         store.commit()
 
-        # Best leads first — a capped export should return the top of the list,
-        # not an arbitrary slice of it.
-        final.sort(key=lambda r: (-r["lead_score"], r.get("name") or ""))
+        final = sorted(live.values(), key=lambda r: (-r["lead_score"], r.get("name") or ""))
         if args.only_with_email:
             final = [r for r in final if (r.get("email") or "").strip()]
         if args.only_verified_email:
@@ -322,7 +341,6 @@ def run_search(args, emitter):
         try:
             for rec in final:
                 writer.write(rec)
-                emitter.lead({k: v for k, v in rec.items() if k != "_reasons"})
         finally:
             writer.close()
 
@@ -370,6 +388,8 @@ def main(argv=None):
     p.add_argument("--no-rera", action="store_true", help="skip the RERA registry spine")
     p.add_argument("--no-enrich", action="store_true", help="skip website email discovery")
     p.add_argument("--no-verify", action="store_true", help="skip MX verification")
+    p.add_argument("--enrich-workers", type=int, default=10,
+                   help="concurrent website crawls during enrichment")
     p.add_argument("--keep-brokers", action="store_true", help="do not filter non-builders")
     p.add_argument("--only-with-email", action="store_true")
     p.add_argument("--only-verified-email", action="store_true")
