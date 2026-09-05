@@ -8,6 +8,7 @@ const fs = require("fs");
 // desktop/ lives inside the repo; the scraper, output/, and config.json are one up.
 const REPO_ROOT = path.join(__dirname, "..");
 const SCRAPER = path.join(REPO_ROOT, "scraper", "scraper.py");
+const STATUS_SCRIPT = path.join(REPO_ROOT, "scraper", "status.py");
 const OUTPUT_DIR = path.join(REPO_ROOT, "output");
 const CONFIG_PATH = path.join(REPO_ROOT, "config.json");
 
@@ -19,7 +20,11 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1200,
     height: 820,
-    title: "Google Maps Lead Scraper",
+    title: "Builder Leads",
+    minWidth: 1040,
+    minHeight: 640,
+    backgroundColor: "#0b0d10",
+    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -74,20 +79,24 @@ function pythonExe() {
 function startScrape(_evt, opts) {
   if (child) return { ok: false, error: "A scrape is already running." };
 
-  const args = [
-    SCRAPER,
-    "--location", String(opts.location || ""),
-    "--max-results", String(opts.maxResults || 100),
-    "--output-dir", OUTPUT_DIR,
-    "--json",
-  ];
-  if (opts.category && String(opts.category).trim()) {
-    args.push("--category", String(opts.category));
+  const mode = opts.mode === "harvest" ? "harvest" : "search";
+  const args = [SCRAPER, "--mode", mode, "--output-dir", OUTPUT_DIR, "--json"];
+
+  if (mode === "harvest") {
+    // A full registry walk is ~1250 pages; the UI offers a bounded run too.
+    if (opts.maxPages) args.push("--max-pages", String(opts.maxPages));
+    if (opts.delay) args.push("--delay", String(opts.delay));
+  } else {
+    args.push("--location", String(opts.location || ""));
+    args.push("--max-results", String(opts.maxResults || 100));
+    const source = ["auto", "apify", "browser"].includes(opts.source) ? opts.source : "auto";
+    args.push("--source", source);
+    if (opts.onlyWithEmail) args.push("--only-with-email");
+    if (opts.onlyVerifiedEmail) args.push("--only-verified-email");
+    if (opts.keepBrokers) args.push("--keep-brokers");
+    if (opts.noEnrich) args.push("--no-enrich");
+    if (opts.noRera) args.push("--no-rera");
   }
-  const source = ["auto", "apify", "browser"].includes(opts.source) ? opts.source : "auto";
-  args.push("--source", source);
-  if (opts.onlyNoWebsite) args.push("--only-no-website");
-  if (opts.onlyWithEmail) args.push("--only-with-email");
 
   try {
     // detached:true makes the child its own process-group leader so a forced
@@ -194,10 +203,14 @@ function revealOutput() {
 
 // ---- export filtered view ---------------------------------------------------
 
+// Must stay identical to scraper/mapping.py::COLUMNS and events.py::CsvWriter,
+// or the filtered export drifts from the run CSV.
 const COLUMNS = [
   "name", "category", "full_address", "city", "state", "postal_code",
   "phone", "website", "email", "rating", "reviews_count", "opening_hours",
   "latitude", "longitude", "google_maps_url",
+  "rera_number", "promoter_name", "promoter_type", "active_projects",
+  "email_confidence", "lead_score", "sources",
 ];
 
 function csvCell(v) {
@@ -219,6 +232,32 @@ async function exportFiltered(_evt, rows) {
   }
   fs.writeFileSync(res.filePath, lines.join("\n"), "utf-8");
   return { ok: true, path: res.filePath, count: (rows || []).length };
+}
+
+// ---- registry status --------------------------------------------------------
+
+// Shelled out to Python because the main process has no SQLite driver, and
+// adding a native module just to render a status chip is not worth it.
+function registryStatus() {
+  return new Promise((resolve) => {
+    let out = "";
+    let proc;
+    try {
+      proc = spawn(pythonExe(), [STATUS_SCRIPT], { cwd: path.join(REPO_ROOT, "scraper") });
+    } catch (e) {
+      resolve({ ok: false, error: String(e) });
+      return;
+    }
+    proc.stdout.on("data", (c) => { out += c.toString(); });
+    proc.on("error", (e) => resolve({ ok: false, error: e.message }));
+    proc.on("close", () => {
+      try {
+        resolve(JSON.parse(out.trim().split("\n").pop()));
+      } catch {
+        resolve({ ok: false, error: "could not read registry status" });
+      }
+    });
+  });
 }
 
 // ---- settings ---------------------------------------------------------------
@@ -258,6 +297,7 @@ app.whenReady().then(() => {
   ipcMain.handle("run:open", openRun);
   ipcMain.handle("output:reveal", revealOutput);
   ipcMain.handle("export:filtered", exportFiltered);
+  ipcMain.handle("registry:status", registryStatus);
   ipcMain.handle("settings:get", getSettings);
   ipcMain.handle("settings:save", saveSettings);
 

@@ -3,128 +3,181 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Google Maps Lead Scraper</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'self'; script-src 'self';" />
+  <title>Builder Leads</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">▚ Google Maps Lead Scraper</div>
-    <button id="settingsBtn" class="ghost">⚙ Settings</button>
-  </header>
 
-  <!-- Search form -->
-  <section class="panel form">
-    <div class="field grow">
-      <label for="location">Location <span class="req">*</span></label>
-      <input id="location" type="text" placeholder="e.g. Punjab, India" />
-    </div>
-    <div class="field grow">
-      <label for="category">Category <span class="opt">(optional — blank = all brands)</span></label>
-      <input id="category" type="text" placeholder="e.g. clothing" />
-    </div>
-    <div class="field small">
-      <label for="maxResults">Max results</label>
-      <input id="maxResults" type="number" value="100" min="1" max="100000" title="Between 1 and 100000" />
-    </div>
-    <div class="field source">
-      <label for="source">Source</label>
-      <select id="source">
-        <option value="auto">Auto (Apify → Browser)</option>
-        <option value="apify">Apify only</option>
-        <option value="browser">Browser only</option>
-      </select>
-    </div>
-    <div class="actions">
-      <button id="startBtn" class="primary">▶ Start</button>
-      <button id="stopBtn" class="danger" disabled>■ Stop</button>
-    </div>
-  </section>
+<header class="topbar">
+  <div class="brand">Builder Leads <span>Maharashtra</span></div>
+  <div class="spacer"></div>
+  <button class="registry" id="registryBtn" title="MahaRERA registry status">
+    <span class="dot" id="registryDot"></span>
+    <span id="registryLabel">registry —</span>
+  </button>
+  <button class="ghost" id="settingsBtn">Settings</button>
+</header>
 
-  <!-- Status bar -->
-  <section class="statusbar">
-    <span class="chip" id="sourceChip">source: —</span>
-    <span class="chip" id="stateChip">idle</span>
-    <span class="chip" id="foundChip">found: 0</span>
-    <span class="chip" id="elapsedChip">0.0s</span>
-    <span class="statusmsg" id="statusMsg"></span>
-  </section>
+<section class="searchbar">
+  <div class="field location">
+    <label for="location">Location</label>
+    <input id="location" type="text" placeholder="Pune, Nagpur, Thane…" autocomplete="off" />
+  </div>
+  <div class="field count">
+    <label for="maxResults">Builders</label>
+    <input id="maxResults" class="mono" type="number" value="100" min="1" max="100000" />
+  </div>
+  <div class="field source">
+    <label for="source">Contact source</label>
+    <select id="source">
+      <option value="auto">Auto (Apify → browser)</option>
+      <option value="apify">Apify only</option>
+      <option value="browser">Browser only</option>
+    </select>
+  </div>
+  <div class="go">
+    <button id="startBtn" class="primary">Find builders</button>
+    <button id="stopBtn" class="danger" disabled>Stop</button>
+  </div>
+</section>
 
-  <!-- Filter bar -->
-  <section class="filterbar">
-    <span class="filterlabel" title="These toggles filter the table, and also pre-filter the scrape + saved CSV when you press Start.">Filters <span class="opt">(also applied on Start)</span>:</span>
-    <label class="toggle"><input type="checkbox" id="noWebsite" /> No website only</label>
-    <label class="toggle"><input type="checkbox" id="hasEmail" /> Has email only</label>
-    <input id="search" type="text" class="search" placeholder="Filter by name / category / city / address…" />
-    <span class="showing" id="showing">0 shown</span>
-    <button id="exportBtn" class="ghost">⭳ Export current view → CSV</button>
-  </section>
+<!-- Fill rates, not just a total: "200 found" is meaningless next to how many
+     are actually contactable. Hidden until a run reports real numbers. -->
+<section class="stats" id="stats">
+  <div class="stat hero"><div class="k">Verified email</div><div class="v mono" id="sVerified">0</div><div class="sub" id="sVerifiedSub">ready to send</div></div>
+  <div class="stat"><div class="k">Any email</div><div class="v mono" id="sEmail">0</div><div class="sub" id="sEmailSub">—</div></div>
+  <div class="stat"><div class="k">With phone</div><div class="v mono" id="sPhone">0</div><div class="sub">callable</div></div>
+  <div class="stat"><div class="k">RERA verified</div><div class="v mono" id="sRera">0</div><div class="sub">registered promoters</div></div>
+  <div class="stat"><div class="k">With website</div><div class="v mono" id="sSite">0</div><div class="sub">enrichable</div></div>
+  <div class="stat"><div class="k">Total builders</div><div class="v mono" id="sTotal">0</div><div class="sub">after broker filter</div></div>
+</section>
 
-  <!-- Main: results table + detail panel -->
-  <section class="main">
-    <div class="tablewrap">
-      <table id="leads">
-        <thead>
-          <tr>
-            <th>Name</th><th>Category</th><th>City</th><th>Phone</th>
-            <th>Website</th><th>Email</th><th>Rating</th>
-          </tr>
-        </thead>
-        <tbody id="leadsBody"></tbody>
-      </table>
-      <div id="emptyState" class="empty">No leads yet. Enter a location and press Start.</div>
-    </div>
+<section class="statusbar">
+  <span class="phase" id="phaseRegistry">registry</span>
+  <span class="phase" id="phaseMaps">maps</span>
+  <span class="phase" id="phaseEnrich">emails</span>
+  <span class="phase" id="phaseScore">ranking</span>
+  <span class="statusmsg" id="statusMsg">Idle</span>
+</section>
+<div class="progress" id="progress"><div class="bar"></div></div>
 
-    <aside id="detail" class="detail hidden">
-      <div class="detailhead">
-        <h2 id="detailName">Details</h2>
-        <button id="detailClose" class="ghost">✕</button>
-      </div>
-      <dl id="detailBody"></dl>
-    </aside>
-  </section>
+<section class="toolbar">
+  <label class="toggle" title="Applied when you press Find builders, and to the table"><input type="checkbox" id="onlyEmail" /> Has email</label>
+  <label class="toggle" title="Only addresses whose domain accepts mail"><input type="checkbox" id="onlyVerified" /> Verified only</label>
+  <label class="toggle" title="Keep brokers, agents and suppliers in the results"><input type="checkbox" id="keepBrokers" /> Include brokers</label>
+  <input id="search" class="search" type="text" placeholder="Filter by name, district, email…" autocomplete="off" />
+  <span class="count-note" id="showing">0 shown</span>
+  <button class="sm" id="exportBtn">Export view</button>
+</section>
 
-  <!-- Live logs -->
-  <section class="panel logs">
-    <div class="logshead">
-      <strong>Live logs</strong>
-      <span class="logcount" id="logCount"></span>
-      <span class="spacer"></span>
-      <label class="toggle"><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
-      <button id="clearLogs" class="ghost">Clear</button>
-      <button id="toggleLogs" class="ghost">Hide</button>
-    </div>
-    <div id="logBody" class="logbody"></div>
-  </section>
-
-  <!-- Past runs -->
-  <section class="panel runs">
-    <div class="runshead">
-      <strong>Past runs</strong>
-      <span class="spacer"></span>
-      <button id="refreshRuns" class="ghost">↻ Refresh</button>
-      <button id="revealOutput" class="ghost">📂 Open output folder</button>
-    </div>
-    <ul id="runsList" class="runslist"></ul>
-  </section>
-
-  <!-- Settings modal -->
-  <div id="settingsModal" class="modal hidden">
-    <div class="modalcard">
-      <h2>Settings</h2>
-      <p class="hint">The Apify token is stored locally in <code>config.json</code> (gitignored) and used as the primary scraping source. Without it, the scraper falls back to the browser.</p>
-      <label for="apifyToken">Apify API token</label>
-      <input id="apifyToken" type="password" placeholder="paste token to set / update" />
-      <p class="tokenstate" id="tokenState"></p>
-      <label for="pythonPath">Python executable <span class="opt">(leave blank to auto-detect)</span></label>
-      <input id="pythonPath" type="text" placeholder="auto" />
-      <p class="tokenstate" id="pythonState"></p>
-      <div class="modalactions">
-        <button id="settingsCancel" class="ghost">Cancel</button>
-        <button id="settingsSave" class="primary">Save</button>
-      </div>
+<section class="main">
+  <div class="tablewrap">
+    <table id="leads" hidden>
+      <thead>
+        <tr>
+          <th class="c-score">Score</th>
+          <th>Builder</th>
+          <th class="c-mid">District</th>
+          <th class="c-mid">Phone</th>
+          <th class="c-email">Email</th>
+          <th class="num c-proj">Projects</th>
+          <th class="c-src">Source</th>
+        </tr>
+      </thead>
+      <tbody id="leadsBody"></tbody>
+    </table>
+    <div class="empty" id="emptyState">
+      <h3>No search yet</h3>
+      <p>Enter a location and how many builders you want.<br />
+         Results are ranked so the most contactable firms come first.</p>
     </div>
   </div>
 
-  <script src="renderer.js"></script>
+  <aside class="detail" id="detail" hidden>
+    <div class="detailhead">
+      <h2 id="detailName">Details</h2>
+      <button class="ghost sm" id="detailClose">Close</button>
+    </div>
+    <dl id="detailBody"></dl>
+  </aside>
+</section>
+
+<section class="logs">
+  <div class="logshead">
+    <strong>Activity</strong>
+    <span class="count-note" id="logCount"></span>
+    <span class="spacer"></span>
+    <label class="toggle"><input type="checkbox" id="autoscroll" checked /> Follow</label>
+    <button class="ghost sm" id="clearLogs">Clear</button>
+    <button class="ghost sm" id="toggleLogs">Hide</button>
+  </div>
+  <div id="logBody" class="logbody"></div>
+</section>
+
+<!-- Registry / harvest -->
+<div class="modal" id="registryModal" hidden>
+  <div class="modalcard">
+    <h2>MahaRERA registry</h2>
+    <p class="hint">
+      The registry is the list of state-registered promoters. It is what proves a
+      firm is a real developer rather than a broker, and it supplies project
+      counts. Harvest it once — every later search then reads it locally.
+    </p>
+    <p class="note warn" id="reraCaptchaNote">
+      Note: MahaRERA does not publish promoter phone or email — those pages are
+      CAPTCHA-gated, and that gate is respected. Contacts come from the Google
+      Maps sweep and the website crawl instead.
+    </p>
+
+    <div class="rows">
+      <div class="r"><span class="n">Projects cached</span><span class="m" id="regProjects">—</span></div>
+      <div class="r"><span class="n">Districts covered</span><span class="m" id="regDistricts">—</span></div>
+      <div class="r"><span class="n">Companies known</span><span class="m" id="regCompanies">—</span></div>
+      <div class="r"><span class="n">Last harvest</span><span class="m" id="regLast">never</span></div>
+    </div>
+
+    <label for="harvestPages">Pages to harvest <span class="muted">(10 projects each, max 1249)</span></label>
+    <input id="harvestPages" class="mono" type="number" value="200" min="1" max="1249" />
+    <p class="note">
+      About 2.5s per page, so 200 pages ≈ 8 minutes and the full 1249 ≈ 50 minutes.
+      Re-running tops the registry up; nothing is duplicated.
+    </p>
+
+    <div class="districts" id="regDistrictList"></div>
+
+    <div class="modalactions">
+      <button class="ghost" id="registryClose">Close</button>
+      <button class="primary" id="harvestBtn">Harvest registry</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings -->
+<div class="modal" id="settingsModal" hidden>
+  <div class="modalcard">
+    <h2>Settings</h2>
+    <p class="hint">
+      Stored locally in <code>config.json</code>, which is gitignored. The Apify
+      token is never sent to this window — only whether one is set.
+    </p>
+
+    <label for="apifyToken">Apify API token</label>
+    <input id="apifyToken" type="password" placeholder="paste to set or update" />
+    <p class="note" id="tokenState"></p>
+
+    <label for="pythonPath">Python executable <span class="muted">(blank = auto-detect)</span></label>
+    <input id="pythonPath" type="text" placeholder="auto" />
+    <p class="note" id="pythonState"></p>
+
+    <div class="modalactions">
+      <button class="ghost" id="settingsCancel">Cancel</button>
+      <button class="primary" id="settingsSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="renderer.js"></script>
 </body>
 </html>

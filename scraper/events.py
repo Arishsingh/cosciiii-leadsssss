@@ -34,6 +34,12 @@ class Emitter:
         elif t == "lead":
             d = obj["data"]
             sys.stdout.write(f"  + {d.get('name', '')}  |  {d.get('phone', '')}  |  {d.get('website', '') or 'NO WEBSITE'}\n")
+        elif t == "stats":
+            d = obj["data"]
+            sys.stdout.write(
+                f"  {d['total']} builders | {d['with_email']} with email "
+                f"({d['email_rate']}%) | {d['verified_email']} verified | "
+                f"{d['with_phone']} with phone | {d['with_rera']} RERA-registered\n")
         elif t == "done":
             sys.stdout.write(f"Done. {obj.get('total')} leads -> {obj.get('csv_path')}\n")
         elif t == "error":
@@ -47,6 +53,10 @@ class Emitter:
 
     def lead(self, data):
         self._emit({"type": "lead", "data": data})
+
+    def stats(self, data):
+        """Fill-rate summary emitted once, just before `done`."""
+        self._emit({"type": "stats", "data": data})
 
     def done(self, total, csv_path):
         self._emit({"type": "done", "total": total, "csv_path": csv_path})

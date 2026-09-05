@@ -24,6 +24,16 @@ COLUMNS = [
     "latitude",
     "longitude",
     "google_maps_url",
+    # --- real-estate additions -------------------------------------------
+    # Appended, never inserted: the first 15 keep their original order so an
+    # existing CSV or Google Sheet built on this schema still lines up.
+    "rera_number",       # MahaRERA registration no. — proof this is a developer
+    "promoter_name",     # the person/entity behind the firm, for salutations
+    "promoter_type",     # Individual / Company / LLP — a size proxy
+    "active_projects",   # registered project count, best size signal available
+    "email_confidence",  # verified | site-crawl | generic | guess | ""
+    "lead_score",        # 0-100, see scoring.py
+    "sources",           # comma-joined provenance, e.g. "gmaps,rera"
 ]
 
 
@@ -78,6 +88,15 @@ def map_record(rec):
         "latitude": location.get("lat", "") if location else "",
         "longitude": location.get("lng", "") if location else "",
         "google_maps_url": rec.get("url") or "",
+        # Present on merged/RERA records; absent on a raw Maps record, in which
+        # case they stay blank and are filled in later by the merge in db.py.
+        "rera_number": rec.get("rera_number") or "",
+        "promoter_name": rec.get("promoter_name") or "",
+        "promoter_type": rec.get("promoter_type") or "",
+        "active_projects": rec.get("active_projects") or 0,
+        "email_confidence": rec.get("email_confidence") or "",
+        "lead_score": rec.get("lead_score") or 0,
+        "sources": rec.get("sources") or "",
     }
 
 

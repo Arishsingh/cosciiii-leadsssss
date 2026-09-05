@@ -1,16 +1,9 @@
-# Scraper output & local secrets
+venv/
+.venv/
+data/
 output/
 config.json
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-scraper/.venv/
-
-# Node / Electron
 node_modules/
-desktop/node_modules/
-npm-debug.log*
+__pycache__/
+*.pyc
 .DS_Store

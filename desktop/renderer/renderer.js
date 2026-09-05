@@ -1,354 +1,443 @@
 "use strict";
 
-// ---- state ------------------------------------------------------------------
-
-let leads = [];           // every lead streamed in this run
-let selectedIndex = -1;   // index into `leads` of the row shown in the detail panel
-let running = false;
-let elapsedTimer = null;
-let startTime = 0;
-
-const DETAIL_FIELDS = [
-  ["name", "Name"], ["category", "Category"], ["full_address", "Address"],
-  ["city", "City"], ["state", "State"], ["postal_code", "Postal code"],
-  ["phone", "Phone"], ["website", "Website"], ["email", "Email"],
-  ["rating", "Rating"], ["reviews_count", "Reviews"], ["opening_hours", "Opening hours"],
-  ["latitude", "Latitude"], ["longitude", "Longitude"], ["google_maps_url", "Google Maps"],
-];
+/* Renderer for Builder Leads.
+ *
+ * Reads the scraper's NDJSON event stream (status / progress / lead / stats /
+ * done / error, plus an `exit` the main process synthesizes) and renders it.
+ * Runs with contextIsolation on, so every privileged call goes through
+ * window.api from preload.js.
+ */
 
 const $ = (id) => document.getElementById(id);
 
-// Apify plan caps runs; keep result requests bounded to protect usage/cost.
-// Blank/non-numeric falls back to the default; 0/negative clamps up to the min.
-const MAX_RESULTS = 100000;
-const clampMax = (n) => {
-  const v = parseInt(n, 10);
-  return Number.isNaN(v) ? 100 : Math.min(MAX_RESULTS, Math.max(1, v));
+const el = {
+  location: $("location"), maxResults: $("maxResults"), source: $("source"),
+  start: $("startBtn"), stop: $("stopBtn"),
+  stats: $("stats"),
+  sVerified: $("sVerified"), sVerifiedSub: $("sVerifiedSub"),
+  sEmail: $("sEmail"), sEmailSub: $("sEmailSub"), sPhone: $("sPhone"),
+  sRera: $("sRera"), sSite: $("sSite"), sTotal: $("sTotal"),
+  phases: {
+    registry: $("phaseRegistry"), maps: $("phaseMaps"),
+    enrich: $("phaseEnrich"), score: $("phaseScore"),
+  },
+  statusMsg: $("statusMsg"), progress: $("progress"),
+  onlyEmail: $("onlyEmail"), onlyVerified: $("onlyVerified"),
+  keepBrokers: $("keepBrokers"), search: $("search"),
+  showing: $("showing"), exportBtn: $("exportBtn"),
+  table: $("leads"), tbody: $("leadsBody"), empty: $("emptyState"),
+  detail: $("detail"), detailName: $("detailName"), detailBody: $("detailBody"),
+  detailClose: $("detailClose"),
+  logBody: $("logBody"), logCount: $("logCount"), autoscroll: $("autoscroll"),
+  clearLogs: $("clearLogs"), toggleLogs: $("toggleLogs"),
+  registryBtn: $("registryBtn"), registryDot: $("registryDot"),
+  registryLabel: $("registryLabel"), registryModal: $("registryModal"),
+  registryClose: $("registryClose"), harvestBtn: $("harvestBtn"),
+  harvestPages: $("harvestPages"),
+  regProjects: $("regProjects"), regDistricts: $("regDistricts"),
+  regCompanies: $("regCompanies"), regLast: $("regLast"),
+  regDistrictList: $("regDistrictList"),
+  settingsBtn: $("settingsBtn"), settingsModal: $("settingsModal"),
+  settingsCancel: $("settingsCancel"), settingsSave: $("settingsSave"),
+  apifyToken: $("apifyToken"), pythonPath: $("pythonPath"),
+  tokenState: $("tokenState"), pythonState: $("pythonState"),
 };
 
-// ---- filtering + rendering --------------------------------------------------
+let leads = [];          // every lead from the current run, in arrival order
+let selected = null;     // index into `leads`
+let running = false;
+let mode = "search";
+let logCount = 0;
 
-function visibleLeads() {
-  const noWebsite = $("noWebsite").checked;
-  const hasEmail = $("hasEmail").checked;
-  const q = $("search").value.trim().toLowerCase();
-  return leads.filter((l) => {
-    if (noWebsite && (l.website || "").trim()) return false;
-    if (hasEmail && !(l.email || "").trim()) return false;
-    if (q) {
-      const hay = `${l.name} ${l.category} ${l.city} ${l.full_address}`.toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    return true;
-  });
+/* ------------------------------------------------------------------ helpers */
+
+const esc = (s) =>
+  String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function setPhase(name, state) {
+  const node = el.phases[name];
+  if (!node) return;
+  node.classList.remove("active", "done", "err");
+  if (state) node.classList.add(state);
 }
 
-function renderTable() {
-  const rows = visibleLeads();
-  const body = $("leadsBody");
-  body.innerHTML = "";
-  for (const l of rows) {
-    const idx = leads.indexOf(l);
-    const tr = document.createElement("tr");
-    if (idx === selectedIndex) tr.classList.add("selected");
-    tr.addEventListener("click", () => selectLead(idx));
-
-    const website = (l.website || "").trim()
-      ? `<a href="${escapeAttr(l.website)}" target="_blank">${escapeHtml(shorten(l.website))}</a>`
-      : `<span class="badge-no">— none —</span>`;
-
-    tr.innerHTML = `
-      <td title="${escapeAttr(l.name)}">${escapeHtml(l.name)}</td>
-      <td title="${escapeAttr(l.category)}">${escapeHtml(l.category)}</td>
-      <td>${escapeHtml(l.city)}</td>
-      <td>${escapeHtml(l.phone)}</td>
-      <td>${website}</td>
-      <td>${escapeHtml(l.email)}</td>
-      <td>${escapeHtml(String(l.rating ?? ""))}</td>`;
-    body.appendChild(tr);
-  }
-  updateEmptyState(rows.length);
-  $("showing").textContent = `${rows.length} shown / ${leads.length} total`;
+function resetPhases() {
+  Object.keys(el.phases).forEach((k) => setPhase(k, null));
 }
-
-// Explain WHY the table is empty — either nothing scraped yet, or filters hid
-// everything. A blank table with no message reads as "broken".
-function updateEmptyState(shownCount) {
-  const el = $("emptyState");
-  if (leads.length === 0) {
-    el.style.display = "block";
-    el.textContent = running
-      ? "Scraping… waiting for the first lead."
-      : "No leads yet. Enter a location and press Start.";
-    return;
-  }
-  if (shownCount === 0) {
-    el.style.display = "block";
-    const withSite = leads.filter((l) => (l.website || "").trim()).length;
-    const q = $("search").value.trim();
-    const reasons = [];
-    if ($("noWebsite").checked) {
-      reasons.push(
-        withSite === leads.length
-          ? `all ${leads.length} results have a website, so “No website only” hides them all`
-          : `“No website only” is on`
-      );
-    }
-    if ($("hasEmail").checked) reasons.push(`“Has email only” is on`);
-    if (q) reasons.push(`the search box (“${q}”) is filtering — clear it to widen results`);
-    const why = reasons.length ? ` — ${reasons.join("; ")}.` : ".";
-    el.textContent = `${leads.length} found, but 0 match the current filters${why}`;
-    return;
-  }
-  el.style.display = "none";
-}
-
-function selectLead(idx) {
-  selectedIndex = idx;
-  const l = leads[idx];
-  $("detailName").textContent = l.name || "Details";
-  const dl = $("detailBody");
-  dl.innerHTML = "";
-  for (const [key, label] of DETAIL_FIELDS) {
-    const val = l[key];
-    const dt = document.createElement("dt");
-    dt.textContent = label;
-    const dd = document.createElement("dd");
-    if (key === "website" && (val || "").trim()) {
-      dd.innerHTML = `<a href="${escapeAttr(val)}" target="_blank">${escapeHtml(val)}</a>`;
-    } else if (key === "google_maps_url" && (val || "").trim()) {
-      dd.innerHTML = `<a href="${escapeAttr(val)}" target="_blank">open in Maps ↗</a>`;
-    } else if (key === "email" && (val || "").trim()) {
-      dd.innerHTML = `<a href="mailto:${escapeAttr(val)}">${escapeHtml(val)}</a>`;
-    } else {
-      dd.textContent = (val === "" || val === null || val === undefined) ? "—" : String(val);
-    }
-    dl.appendChild(dt);
-    dl.appendChild(dd);
-  }
-  $("detail").classList.remove("hidden");
-  renderTable();
-}
-
-// ---- scrape lifecycle -------------------------------------------------------
 
 function setRunning(on) {
   running = on;
-  $("startBtn").disabled = on;
-  $("stopBtn").disabled = !on;
-  $("location").disabled = on;
-  $("category").disabled = on;
-  $("maxResults").disabled = on;
-  $("source").disabled = on;
+  el.start.disabled = on;
+  el.stop.disabled = !on;
+  el.harvestBtn.disabled = on;
+  el.progress.classList.toggle("on", on);
+  el.start.textContent = on ? "Working…" : "Find builders";
 }
 
-function tickElapsed() {
-  const secs = (Date.now() - startTime) / 1000;
-  $("elapsedChip").textContent = `${secs.toFixed(1)}s`;
+function log(text, cls) {
+  const line = document.createElement("div");
+  line.className = "logline" + (cls ? " ev-" + cls : "");
+  const ts = new Date().toLocaleTimeString([], { hour12: false });
+  line.innerHTML = `<span class="ts">${ts}</span>${esc(text)}`;
+  el.logBody.appendChild(line);
+  logCount += 1;
+  el.logCount.textContent = `${logCount} events`;
+  if (el.autoscroll.checked) el.logBody.scrollTop = el.logBody.scrollHeight;
 }
 
-async function start() {
-  const location = $("location").value.trim();
-  if (!location) { $("location").focus(); return; }
+/* -------------------------------------------------------------------- table */
 
-  // reset state
-  leads = [];
-  selectedIndex = -1;
-  $("detail").classList.add("hidden");
-  renderTable();
-  $("foundChip").textContent = "found: 0";
-  $("statusMsg").textContent = "";
-  setChip($("stateChip"), "starting…", "active");
+function emailBadge(lead) {
+  const email = (lead.email || "").trim();
+  if (!email) return '<span class="badge none">none</span>';
+  const conf = lead.email_confidence || "";
+  const cls = conf === "verified" ? "verified" : conf === "generic" ? "generic" : "site";
+  const label = conf === "verified" ? "verified" : conf === "generic" ? "role" : "found";
+  return `<div class="cellflex">
+      <span class="t mono">${esc(email)}</span>
+      <span class="badge ${cls}">${label}</span>
+    </div>`;
+}
 
-  setRunning(true);
-  startTime = Date.now();
-  clearInterval(elapsedTimer);
-  elapsedTimer = setInterval(tickElapsed, 100);
+function scoreCell(score) {
+  const n = Number(score) || 0;
+  const cls = n >= 70 ? "hi" : n >= 40 ? "" : "lo";
+  // Width is applied after insertion via CSSOM, not as a style attribute:
+  // the page's CSP is `style-src 'self'`, which blocks inline style attributes.
+  return `<div class="score">
+      <span class="track"><span class="fill ${cls}" data-w="${Math.max(2, n)}"></span></span>
+      <span class="n">${n}</span>
+    </div>`;
+}
 
-  // Clamp to [1, 100000] and reflect the corrected value back into the field.
-  const maxResults = clampMax($("maxResults").value);
-  $("maxResults").value = maxResults;
-
-  const cat = $("category").value.trim();
-  const scrapeFilters = [$("noWebsite").checked ? "no-website" : "", $("hasEmail").checked ? "has-email" : ""].filter(Boolean);
-  logLine(`▶ start — "${cat || "all"} in ${location}" · source=${$("source").value} · max=${maxResults}${scrapeFilters.length ? " · filter: " + scrapeFilters.join(", ") : ""}`, "system");
-
-  const res = await window.api.startScrape({
-    location,
-    category: $("category").value.trim(),
-    maxResults,
-    source: $("source").value,
-    // The filter toggles, snapshotted at Start, also pre-filter the scrape + CSV.
-    onlyNoWebsite: $("noWebsite").checked,
-    onlyWithEmail: $("hasEmail").checked,
+/** Rows the toolbar filters currently allow through. */
+function visibleLeads() {
+  const q = el.search.value.trim().toLowerCase();
+  return leads.filter((l) => {
+    if (el.onlyEmail.checked && !(l.email || "").trim()) return false;
+    if (el.onlyVerified.checked && l.email_confidence !== "verified") return false;
+    if (!q) return true;
+    return ["name", "city", "district", "email", "phone", "rera_number", "promoter_name"]
+      .some((f) => String(l[f] ?? "").toLowerCase().includes(q));
   });
-  if (!res.ok) {
-    setChip($("stateChip"), "error", "err");
-    $("statusMsg").textContent = res.error || "failed to start";
-    finish();
-  }
 }
 
-function finish() {
-  setRunning(false);
-  clearInterval(elapsedTimer);
-  tickElapsed();
-  refreshRuns();
-}
+function renderTable(animateFromIndex) {
+  const rows = visibleLeads();
+  el.showing.textContent = `${rows.length} shown`;
+  el.table.hidden = rows.length === 0;
+  el.empty.hidden = rows.length > 0;
 
-function handleEvent(evt) {
-  switch (evt.type) {
-    case "status":
-      $("sourceChip").textContent = `source: ${evt.source || "—"}`;
-      setChip($("stateChip"), evt.state, evt.state === "fallback" ? "err" : "active");
-      if (evt.message) $("statusMsg").textContent = evt.message;
-      logLine(`[${evt.source || "-"}] ${evt.state}${evt.message ? ": " + evt.message : ""}`,
-        evt.state === "fallback" ? "fallback" : evt.state === "error" ? "error" : "status");
-      break;
-    case "progress":
-      $("foundChip").textContent = `found: ${evt.found}`;
-      break;
-    case "lead":
-      leads.push(evt.data);
-      renderTable();
-      logLine(`＋ ${evt.data.name || "(no name)"}  ·  ${(evt.data.website || "").trim() || "no website"}${evt.data.phone ? "  ·  " + evt.data.phone : ""}`, "lead");
-      break;
-    case "done":
-      setChip($("stateChip"), `done (${evt.total})`, "done");
-      $("statusMsg").textContent = evt.csv_path ? `saved → ${evt.csv_path}` : "";
-      logLine(`✓ done — ${evt.total} lead${evt.total === 1 ? "" : "s"}${evt.csv_path ? " → " + evt.csv_path : ""}`, "done");
-      break;
-    case "error":
-      setChip($("stateChip"), "error", "err");
-      $("statusMsg").textContent = evt.message || "error";
-      logLine(`✗ ${evt.message || "error"}`, "error");
-      break;
-    case "exit":
-      logLine(`● process exited (code ${evt.code})`, "system");
-      finish();
-      break;
-  }
-}
-
-// ---- past runs --------------------------------------------------------------
-
-async function refreshRuns() {
-  const runs = await window.api.listRuns();
-  const ul = $("runsList");
-  ul.innerHTML = "";
-  if (!runs.length) {
-    ul.innerHTML = `<li class="rmeta">No CSVs in output/ yet.</li>`;
+  if (rows.length === 0) {
+    el.tbody.innerHTML = "";
+    if (leads.length > 0) {
+      el.empty.innerHTML =
+        "<h3>Nothing matches those filters</h3><p>Loosen the filters above to see the rest of the run.</p>";
+    }
     return;
   }
-  for (const r of runs) {
-    const li = document.createElement("li");
-    const kb = (r.size / 1024).toFixed(1);
-    li.innerHTML = `<span class="rname" title="${escapeAttr(r.name)}">${escapeHtml(r.name)}</span>
-      <span class="rmeta">${kb} KB</span>`;
-    const open = document.createElement("button");
-    open.className = "ghost";
-    open.textContent = "Open";
-    open.addEventListener("click", () => window.api.openRun(r.path));
-    li.appendChild(open);
-    ul.appendChild(li);
+
+  el.tbody.innerHTML = rows.map((l, i) => {
+    const idx = leads.indexOf(l);
+    const rera = (l.rera_number || "").trim()
+      ? `<span class="badge rera">RERA</span>` : "";
+    const isNew = animateFromIndex !== undefined && idx >= animateFromIndex;
+    return `<tr data-i="${idx}" class="${idx === selected ? "selected" : ""}${isNew ? " enter" : ""}">
+      <td>${scoreCell(l.lead_score)}</td>
+      <td>
+        <div class="cellflex">
+          <span class="t cname">${esc(l.name)}</span>
+          ${rera}
+        </div>
+        ${l.category ? `<div class="csub">${esc(l.category)}</div>` : ""}
+      </td>
+      <td>${esc(l.district || l.city || "") || '<span class="muted">—</span>'}</td>
+      <td class="mono">${esc(l.phone) || '<span class="muted">—</span>'}</td>
+      <td>${emailBadge(l)}</td>
+      <td class="num mono">${Number(l.active_projects) || '<span class="muted">—</span>'}</td>
+      <td class="mono muted src">${esc(l.sources || "")}</td>
+    </tr>`;
+  }).join("");
+
+  // Apply score-bar widths through CSSOM (allowed) rather than markup (blocked).
+  el.tbody.querySelectorAll(".fill[data-w]").forEach((n) => {
+    n.style.width = n.dataset.w + "%";
+  });
+}
+
+el.tbody.addEventListener("click", (e) => {
+  const tr = e.target.closest("tr");
+  if (!tr) return;
+  selected = Number(tr.dataset.i);
+  renderTable();
+  showDetail(leads[selected]);
+});
+
+const DETAIL_FIELDS = [
+  ["Lead score", "lead_score"], ["RERA number", "rera_number"],
+  ["Promoter", "promoter_name"], ["Registered projects", "active_projects"],
+  ["Phone", "phone"], ["Email", "email"], ["Email confidence", "email_confidence"],
+  ["Website", "website"], ["Category", "category"], ["Address", "full_address"],
+  ["District", "district"], ["City", "city"], ["Pincode", "postal_code"],
+  ["Rating", "rating"], ["Reviews", "reviews_count"], ["Sources", "sources"],
+];
+
+function showDetail(lead) {
+  if (!lead) return;
+  el.detail.hidden = false;
+  el.detailName.textContent = lead.name || "Details";
+  el.detailBody.innerHTML = DETAIL_FIELDS.map(([label, key]) => {
+    let v = lead[key];
+    if (v === "" || v === null || v === undefined || v === 0) {
+      if (key !== "lead_score" && key !== "active_projects") return "";
+    }
+    if (key === "website" && v) {
+      v = `<a href="${esc(v)}" target="_blank" rel="noreferrer">${esc(v)}</a>`;
+    } else if (key === "email" && v) {
+      v = `<span class="mono">${esc(v)}</span>`;
+    } else {
+      v = esc(v);
+    }
+    return `<dt>${label}</dt><dd>${v}</dd>`;
+  }).join("");
+
+  if (lead.google_maps_url) {
+    el.detailBody.innerHTML +=
+      `<dt>Google Maps</dt><dd><a href="${esc(lead.google_maps_url)}" target="_blank" rel="noreferrer">Open listing</a></dd>`;
   }
 }
 
-// ---- settings ---------------------------------------------------------------
+el.detailClose.addEventListener("click", () => { el.detail.hidden = true; });
 
-async function openSettings() {
-  const s = await window.api.getSettings();
-  $("tokenState").textContent = s.hasToken ? "✓ a token is currently saved" : "⚠ no token saved — scraper will use the browser fallback";
-  $("tokenState").style.color = s.hasToken ? "var(--accent)" : "var(--danger)";
-  $("apifyToken").value = "";
-  $("pythonPath").value = s.pythonPath || "";
-  const ps = $("pythonState");
-  ps.textContent = `Using: ${s.resolvedPython}${s.autoVenv && !s.pythonPath ? " (auto-detected project venv)" : ""}`;
-  ps.style.color = s.autoVenv || s.pythonPath ? "var(--accent)" : "var(--muted)";
-  $("settingsModal").classList.remove("hidden");
+/* -------------------------------------------------------------------- stats */
+
+function renderStats(s) {
+  const pct = (n) => (s.total ? `${Math.round((100 * n) / s.total)}% of ${s.total}` : "—");
+  el.sVerified.textContent = s.verified_email ?? 0;
+  el.sVerifiedSub.textContent = pct(s.verified_email ?? 0);
+  el.sEmail.textContent = s.with_email ?? 0;
+  el.sEmailSub.textContent = `${s.email_rate ?? 0}% fill rate`;
+  el.sPhone.textContent = s.with_phone ?? 0;
+  el.sRera.textContent = s.with_rera ?? 0;
+  el.sSite.textContent = s.with_website ?? 0;
+  el.sTotal.textContent = s.total ?? 0;
+  el.stats.classList.add("show");
 }
 
-async function saveSettings() {
-  await window.api.saveSettings({
-    apifyToken: $("apifyToken").value,
-    pythonPath: $("pythonPath").value,
+/* ------------------------------------------------------------- event stream */
+
+window.api.onEvent((evt) => {
+  switch (evt.type) {
+    case "status": {
+      const src = evt.source || "-";
+      const msg = evt.message || evt.state || "";
+      el.statusMsg.textContent = msg;
+      if (src === "rera") setPhase("registry", evt.state === "done" ? "done" : "active");
+      if (src === "apify" || src === "browser") setPhase("maps", "active");
+      if (src === "enrich") setPhase("enrich", "active");
+      if (src === "-") setPhase("score", "active");
+      log(`[${src}] ${msg}`, evt.state === "fallback" ? "fallback" : null);
+      break;
+    }
+    case "progress":
+      el.statusMsg.textContent = `${evt.found} found…`;
+      break;
+    case "lead": {
+      const before = leads.length;
+      leads.push(evt.data);
+      renderTable(before);
+      break;
+    }
+    case "stats":
+      renderStats(evt.data);
+      break;
+    case "done":
+      setPhase("score", "done");
+      if (mode === "harvest") {
+        log(`Harvest complete — ${evt.total} projects.`, "done");
+        refreshRegistry();
+      } else {
+        log(`Done — ${evt.total} builders → ${evt.csv_path}`, "done");
+      }
+      el.statusMsg.textContent = `Finished · ${evt.total} results`;
+      break;
+    case "error":
+      log(evt.message, "error");
+      el.statusMsg.textContent = evt.message;
+      setPhase("score", "err");
+      break;
+    case "exit":
+      setRunning(false);
+      break;
+    default:
+      break;
+  }
+});
+
+/* ------------------------------------------------------------------ actions */
+
+el.start.addEventListener("click", async () => {
+  const location = el.location.value.trim();
+  if (!location) {
+    el.location.focus();
+    el.statusMsg.textContent = "Enter a location first.";
+    return;
+  }
+  mode = "search";
+  leads = [];
+  selected = null;
+  el.detail.hidden = true;
+  el.stats.classList.remove("show");
+  el.empty.innerHTML =
+    "<h3>Searching…</h3><p>Reading the registry, then sweeping Google Maps for contacts.</p>";
+  renderTable();
+  resetPhases();
+  setRunning(true);
+  log(`Searching builders in ${location}…`, "system");
+
+  const res = await window.api.startScrape({
+    mode: "search",
+    location,
+    maxResults: Number(el.maxResults.value) || 100,
+    source: el.source.value,
+    onlyWithEmail: el.onlyEmail.checked,
+    onlyVerifiedEmail: el.onlyVerified.checked,
+    keepBrokers: el.keepBrokers.checked,
   });
-  $("settingsModal").classList.add("hidden");
-}
-
-// ---- helpers ----------------------------------------------------------------
-
-function setChip(el, text, cls) {
-  el.textContent = text;
-  el.className = "chip" + (cls ? " " + cls : "");
-}
-function shorten(u) { return u.replace(/^https?:\/\/(www\.)?/, "").slice(0, 30); }
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-function escapeAttr(s) { return escapeHtml(s); }
-
-// ---- live logs --------------------------------------------------------------
-
-const MAX_LOG_LINES = 800;
-
-function logLine(text, level) {
-  const body = $("logBody");
-  const ph = body.querySelector(".logempty");
-  if (ph) ph.remove();
-  const div = document.createElement("div");
-  div.className = "logline ev-" + (level || "status");
-  const ts = document.createElement("span");
-  ts.className = "ts";
-  ts.textContent = new Date().toLocaleTimeString();
-  div.appendChild(ts);
-  div.appendChild(document.createTextNode(text));
-  body.appendChild(div);
-  while (body.children.length > MAX_LOG_LINES) body.removeChild(body.firstChild);
-  if ($("autoscroll").checked) body.scrollTop = body.scrollHeight;
-  $("logCount").textContent = `${body.children.length} lines`;
-}
-
-function clearLogs() {
-  $("logBody").innerHTML = '<div class="logempty">No logs yet — press Start.</div>';
-  $("logCount").textContent = "";
-}
-
-// ---- wiring -----------------------------------------------------------------
-
-$("startBtn").addEventListener("click", start);
-$("stopBtn").addEventListener("click", () => {
-  // Immediate feedback; the UI fully resets when the process exits.
-  $("stopBtn").disabled = true;
-  setChip($("stateChip"), "stopping…", "active");
-  logLine("■ stop requested", "system");
-  window.api.stopScrape();
+  if (!res.ok) {
+    log(res.error, "error");
+    setRunning(false);
+  }
 });
-$("maxResults").addEventListener("change", (e) => { e.target.value = clampMax(e.target.value); });
-$("noWebsite").addEventListener("change", renderTable);
-$("hasEmail").addEventListener("change", renderTable);
-$("search").addEventListener("input", renderTable);
-$("detailClose").addEventListener("click", () => { $("detail").classList.add("hidden"); selectedIndex = -1; renderTable(); });
-$("refreshRuns").addEventListener("click", refreshRuns);
-$("revealOutput").addEventListener("click", () => window.api.revealOutput());
-$("exportBtn").addEventListener("click", async () => {
+
+el.stop.addEventListener("click", async () => {
+  const res = await window.api.stopScrape();
+  if (!res.ok) log(res.error, "error");
+});
+
+el.harvestBtn.addEventListener("click", async () => {
+  mode = "harvest";
+  resetPhases();
+  setPhase("registry", "active");
+  setRunning(true);
+  el.registryModal.hidden = true;
+  const pages = Number(el.harvestPages.value) || 200;
+  log(`Harvesting the MahaRERA registry (${pages} pages)…`, "system");
+  const res = await window.api.startScrape({ mode: "harvest", maxPages: pages });
+  if (!res.ok) {
+    log(res.error, "error");
+    setRunning(false);
+  }
+});
+
+el.exportBtn.addEventListener("click", async () => {
   const rows = visibleLeads();
-  if (!rows.length) { $("statusMsg").textContent = "nothing to export in the current view"; return; }
+  if (!rows.length) {
+    el.statusMsg.textContent = "Nothing to export.";
+    return;
+  }
   const res = await window.api.exportFiltered(rows);
-  if (res.ok) $("statusMsg").textContent = `exported ${res.count} rows → ${res.path}`;
+  if (res.ok) log(`Exported ${res.count} leads → ${res.path}`, "done");
+  else if (!res.canceled) log(res.error || "Export failed.", "error");
 });
 
-$("settingsBtn").addEventListener("click", openSettings);
-$("settingsCancel").addEventListener("click", () => $("settingsModal").classList.add("hidden"));
-$("settingsSave").addEventListener("click", saveSettings);
+[el.onlyEmail, el.onlyVerified].forEach((n) =>
+  n.addEventListener("change", () => renderTable()));
+el.search.addEventListener("input", () => renderTable());
 
-$("clearLogs").addEventListener("click", clearLogs);
-$("toggleLogs").addEventListener("click", () => {
-  const hidden = $("logBody").classList.toggle("hidden");
-  $("toggleLogs").textContent = hidden ? "Show" : "Hide";
+el.clearLogs.addEventListener("click", () => {
+  el.logBody.innerHTML = "";
+  logCount = 0;
+  el.logCount.textContent = "";
+});
+el.toggleLogs.addEventListener("click", () => {
+  el.logBody.hidden = !el.logBody.hidden;
+  el.toggleLogs.textContent = el.logBody.hidden ? "Show" : "Hide";
 });
 
-window.api.onEvent(handleEvent);
-clearLogs();
-refreshRuns();
+/* ----------------------------------------------------------------- registry */
+
+async function refreshRegistry() {
+  const s = await window.api.registryStatus();
+  if (!s || !s.ok) {
+    el.registryLabel.textContent = "registry unavailable";
+    el.registryDot.className = "dot";
+    return;
+  }
+  const n = s.reraProjects || 0;
+  el.registryLabel.textContent = n
+    ? `${n.toLocaleString()} projects`
+    : "registry empty";
+  el.registryDot.className = "dot " + (n ? "ok" : "empty");
+
+  el.regProjects.textContent = n.toLocaleString();
+  el.regDistricts.textContent = (s.reraDistricts || []).length;
+  el.regCompanies.textContent = (s.companies || 0).toLocaleString();
+  el.regLast.textContent = s.lastHarvest ? s.lastHarvest.replace("_", " ") : "never";
+
+  // Districts double as shortcuts — clicking one runs that search.
+  el.regDistrictList.innerHTML = (s.reraDistricts || [])
+    .slice(0, 24)
+    .map((d) => `<span class="chipx" data-d="${esc(d.name)}">${esc(d.name)}<b>${d.count}</b></span>`)
+    .join("");
+}
+
+el.regDistrictList.addEventListener("click", (e) => {
+  const chip = e.target.closest(".chipx");
+  if (!chip) return;
+  el.location.value = chip.dataset.d;
+  el.registryModal.hidden = true;
+  el.start.click();
+});
+
+el.registryBtn.addEventListener("click", async () => {
+  await refreshRegistry();
+  el.registryModal.hidden = false;
+});
+el.registryClose.addEventListener("click", () => { el.registryModal.hidden = true; });
+
+/* ----------------------------------------------------------------- settings */
+
+async function loadSettings() {
+  const s = await window.api.getSettings();
+  el.tokenState.textContent = s.hasToken
+    ? "A token is saved. Apify is used first, with the browser as fallback."
+    : "No token saved — the browser scraper will be used (slower, and it scrapes Maps directly).";
+  el.pythonPath.value = s.pythonPath || "";
+  el.pythonState.textContent = s.autoVenv
+    ? `Using the project virtualenv: ${s.resolvedPython}`
+    : `Using: ${s.resolvedPython}`;
+}
+
+el.settingsBtn.addEventListener("click", async () => {
+  await loadSettings();
+  el.apifyToken.value = "";
+  el.settingsModal.hidden = false;
+});
+el.settingsCancel.addEventListener("click", () => { el.settingsModal.hidden = true; });
+el.settingsSave.addEventListener("click", async () => {
+  await window.api.saveSettings({
+    apifyToken: el.apifyToken.value,
+    pythonPath: el.pythonPath.value,
+  });
+  el.apifyToken.value = "";
+  await loadSettings();
+  el.settingsModal.hidden = true;
+  log("Settings saved.", "system");
+});
+
+// Escape closes whichever modal is open; Enter in the location field searches.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    el.settingsModal.hidden = true;
+    el.registryModal.hidden = true;
+  }
+});
+el.location.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !running) el.start.click();
+});
+
+refreshRegistry();
+loadSettings();
 renderTable();

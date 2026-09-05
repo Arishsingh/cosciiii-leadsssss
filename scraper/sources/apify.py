@@ -21,12 +21,21 @@ class ApifyError(Exception):
 def fetch(search_string, max_results, token):
     """Run the actor synchronously and return a list of raw place records.
 
+    `search_string` may be a single query or a list of them. Several phrasings
+    are needed for a vertical like real estate, where one firm is listed as a
+    "builder", another as a "property developer" and a third as a "construction
+    company" — a single query silently misses most of the market.
+
     Raises ApifyError on any transport/HTTP failure so the orchestrator can fall
     back to the browser scraper.
     """
+    queries = [search_string] if isinstance(search_string, str) else list(search_string)
+    # The actor caps per *search*, so divide the budget across the phrasings
+    # rather than multiplying the bill by the number of queries.
+    per_search = max(1, -(-max_results // max(1, len(queries))))
     body = {
-        "searchStringsArray": [search_string],
-        "maxCrawledPlacesPerSearch": max_results,
+        "searchStringsArray": queries,
+        "maxCrawledPlacesPerSearch": per_search,
         "language": "en",
         "scrapeContacts": True,
     }
