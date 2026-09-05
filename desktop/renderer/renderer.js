@@ -53,6 +53,7 @@ let running = false;
 let mode = "search";
 let logCount = 0;
 let districtAreas = {};  // district -> [taluka, …], for the Area suggestions
+let runLimit = 0;        // how many builders this run was asked for
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -125,8 +126,27 @@ function scoreCell(score) {
     </div>`;
 }
 
-/** Rows the toolbar filters currently allow through. */
+/** Rows the toolbar filters allow through, capped to the requested count.
+ *
+ * The pipeline deliberately gathers more than asked — it over-fetches from the
+ * registry so that after merging, broker filtering and ranking there are still
+ * enough good rows to fill the request. That surplus is working material, not
+ * the answer: asking for 10 builders must show 10.
+ */
 function visibleLeads() {
+  const q = el.search.value.trim().toLowerCase();
+  const matched = leads.filter((l) => {
+    if (el.onlyEmail.checked && !(l.email || "").trim()) return false;
+    if (el.onlyVerified.checked && l.email_confidence !== "verified") return false;
+    if (!q) return true;
+    return ["name", "city", "district", "email", "phone", "rera_number", "promoter_name", "linkedin"]
+      .some((f) => String(l[f] ?? "").toLowerCase().includes(q));
+  });
+  return runLimit > 0 ? matched.slice(0, runLimit) : matched;
+}
+
+/** Everything the filters allow, before the count cap — for the "of N" label. */
+function matchedCount() {
   const q = el.search.value.trim().toLowerCase();
   return leads.filter((l) => {
     if (el.onlyEmail.checked && !(l.email || "").trim()) return false;
@@ -134,7 +154,7 @@ function visibleLeads() {
     if (!q) return true;
     return ["name", "city", "district", "email", "phone", "rera_number", "promoter_name", "linkedin"]
       .some((f) => String(l[f] ?? "").toLowerCase().includes(q));
-  });
+  }).length;
 }
 
 /* Results stream in bursts, and re-rendering the table per row would spend the
@@ -151,7 +171,10 @@ function scheduleRender() {
 
 function renderTable(animateFromIndex) {
   const rows = visibleLeads();
-  el.showing.textContent = `${rows.length} shown`;
+  const matched = matchedCount();
+  el.showing.textContent = matched > rows.length
+    ? `${rows.length} shown · ${matched.toLocaleString()} matched`
+    : `${rows.length} shown`;
   el.table.hidden = rows.length === 0;
   el.empty.hidden = rows.length > 0;
 
@@ -331,6 +354,7 @@ el.start.addEventListener("click", async () => {
     return;
   }
   mode = "search";
+  runLimit = Math.max(1, Number(el.maxResults.value) || 100);
   leads = [];
   byId.clear();
   selected = null;
