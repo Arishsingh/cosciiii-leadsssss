@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS companies (
     active_projects INTEGER DEFAULT 0,
     lead_score      INTEGER DEFAULT 0,
     sources         TEXT,
+    linkedin        TEXT,
     first_seen      TEXT,
     last_seen       TEXT
 );
@@ -109,7 +110,7 @@ _MERGE_FIELDS = [
     "name", "category", "full_address", "city", "district", "state",
     "postal_code", "phone", "website", "email", "rating", "reviews_count",
     "opening_hours", "latitude", "longitude", "google_maps_url",
-    "rera_number", "promoter_name", "promoter_type",
+    "rera_number", "promoter_name", "promoter_type", "linkedin",
 ]
 
 # Ranked worst→best so a stronger email never gets overwritten by a weaker one.
@@ -127,12 +128,35 @@ class LeadStore:
     def __init__(self, path=None):
         self.path = path or default_db_path()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
+        # A harvest can run for the best part of an hour while the app reads the
+        # same file, so the connection has to tolerate contention rather than
+        # fail on it. WAL lets readers proceed during a write; busy_timeout makes
+        # a writer wait its turn instead of raising "database is locked"
+        # immediately (SQLite's default is to give up at once).
+        self.conn = sqlite3.connect(self.path, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
-        # WAL keeps the Electron UI readable while a harvest is mid-write.
+        # Order matters: `journal_mode=WAL` itself needs a brief exclusive lock,
+        # so busy_timeout has to be set FIRST or that pragma is the very thing
+        # that raises "database is locked" when another process holds the file.
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        """Add columns introduced after a database was first created.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so new
+        fields have to be ALTERed in or every older database breaks on the next
+        read. Adding a column is cheap and idempotent here because the check is
+        against the live table shape rather than a version number.
+        """
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(companies)")}
+        for col, decl in (("linkedin", "TEXT"),):
+            if col not in have:
+                self.conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {decl}")
 
     def close(self):
         try:

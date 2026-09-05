@@ -148,6 +148,8 @@ def _seed_from_registry(store, location, limit, emitter, seen_ids):
         cid, _ = store.upsert(rec, "rera", r["rera_number"])
         seen_ids.add(cid)
         n += 1
+        if n % 100 == 0:
+            store.commit()  # keep the write lock short-lived, as above
     store.commit()
     return n
 
@@ -168,6 +170,11 @@ def _sweep_maps(args, store, emitter, seen_ids):
         seen_ids.add(cid)
         got += 1
         if got % 10 == 0:
+            # Commit as we go, not just at the end. Python's sqlite3 holds a
+            # write transaction open from the first INSERT until commit(), so
+            # batching the whole sweep into one transaction would lock the
+            # database for minutes and block a concurrent registry harvest.
+            store.commit()
             emitter.progress(len(seen_ids))
 
     used_apify = False
@@ -260,8 +267,11 @@ def run_search(args, emitter):
 
         # Enrichment is the slow, networked step, so it runs only on records
         # that lack an email and actually have a site to read.
+        # Anything with a site but a gap in either contact field is worth a crawl;
+        # one fetch fills both.
         need = [(cid, r) for cid, r in leads
-                if not (r.get("email") or "").strip() and (r.get("website") or "").strip()]
+                if (r.get("website") or "").strip()
+                and not ((r.get("email") or "").strip() and (r.get("linkedin") or "").strip())]
         if need and not args.no_enrich:
             emitter.status("enrich", "starting",
                            f"looking for emails on {len(need)} company websites…")
@@ -274,9 +284,10 @@ def run_search(args, emitter):
                     enrich_record(rec, verify_mx=not args.no_verify, session=sess)
                 except Exception:  # noqa: BLE001 — one bad site never aborts a run
                     continue
-                if rec.get("email"):
+                if rec.get("email") or rec.get("linkedin"):
                     store.upsert({**rec, "name": rec["name"]}, "enrich")
                 if i % 5 == 0:
+                    store.commit()
                     emitter.status("enrich", "scraping", f"{i}/{len(need)} sites checked")
             store.commit()
 

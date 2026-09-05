@@ -129,6 +129,51 @@ def norm_email(value):
     return v if re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", v) else ""
 
 
+# Company pages and personal profiles; `pub` is the legacy profile form.
+_LINKEDIN_RE = re.compile(
+    r"(?:https?:)?(?://)?(?:[a-z]{2,3}\.)?linkedin\.com/(company|in|pub|school)/([A-Za-z0-9_\-%.]+)",
+    re.I,
+)
+
+
+def norm_linkedin(value):
+    """Return a canonical LinkedIn URL, or "".
+
+    Accepts a bare handle, a messy URL with tracking parameters, or a country
+    subdomain (`in.linkedin.com`), and returns one stable form so the same page
+    found on two different sites doesn't look like two different links.
+    """
+    if not value:
+        return ""
+    v = str(value).strip()
+    m = _LINKEDIN_RE.search(v)
+    if m:
+        kind, handle = m.group(1).lower(), m.group(2).rstrip("/.")
+        if kind == "pub":
+            kind = "in"
+        return f"https://www.linkedin.com/{kind}/{handle}"
+    # A bare "company/foo" or handle, as some directories store it.
+    m = re.match(r"^(company|in)/([A-Za-z0-9_\-%.]+)$", v, re.I)
+    if m:
+        return f"https://www.linkedin.com/{m.group(1).lower()}/{m.group(2).rstrip('/.')}"
+    return ""
+
+
+def find_linkedin(text):
+    """Return every canonical LinkedIn URL in a blob of text/markup, best first.
+
+    Company pages are ranked above personal profiles: for B2B outreach the firm's
+    page is the useful one, and a personal profile in a site footer is often the
+    web designer's rather than the builder's.
+    """
+    out = []
+    for kind, handle in _LINKEDIN_RE.findall(text or ""):
+        url = norm_linkedin(f"https://www.linkedin.com/{kind}/{handle}")
+        if url and url not in out:
+            out.append(url)
+    return sorted(out, key=lambda u: (0 if "/company/" in u else 1, len(u)))
+
+
 def norm_city(value):
     """Uppercase, punctuation-free city/district name for coarse comparison."""
     if not value:

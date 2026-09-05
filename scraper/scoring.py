@@ -17,6 +17,7 @@ W_RERA = 25
 W_PROJECTS_MANY = 15   # 5+ registered projects
 W_PROJECTS_SOME = 8    # 2-4
 W_WEBSITE = 10
+W_LINKEDIN = 8      # a second, non-email channel to the firm
 
 MAX_SCORE = 100
 
@@ -60,5 +61,9 @@ def score_lead(rec):
     if (rec.get("website") or "").strip():
         score += W_WEBSITE
         reasons.append("website")
+
+    if (rec.get("linkedin") or "").strip():
+        score += W_LINKEDIN
+        reasons.append("LinkedIn")
 
     return min(score, MAX_SCORE), reasons

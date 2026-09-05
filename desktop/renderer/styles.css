@@ -354,6 +354,7 @@ th.num, td.num { text-align: right; }
 .c-mid   { width: 118px; }
 .c-email { width: 210px; }
 .c-proj  { width: 74px; }
+.c-li    { width: 92px; }
 .c-src   { width: 96px; }
 td.src   { font-size: 11px; }
 
@@ -387,7 +388,23 @@ tbody tr.enter { animation: rowin 200ms var(--ease-out) both; }
    width), so the badge is never the part that gets cut off. */
 .cellflex { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .cellflex .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.cellflex .badge { flex: none; }
+.cellflex /* The LinkedIn mark reads as a link without spending a column on the URL. */
+a.li {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
+  color: var(--accent);
+  text-decoration: none;
+}
+a.li span {
+  font-weight: 500; font-size: 10px; color: var(--text-3);
+  letter-spacing: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  a.li:hover { text-decoration: underline; }
+  a.li:hover span { color: var(--text-2); }
+}
+
+.badge { flex: none; }
 
 .cname { font-weight: 550; color: var(--text); }
 .csub  { font-size: 10.5px; color: var(--text-3); margin-top: 1px; }
@@ -420,6 +437,22 @@ a { color: var(--accent); text-decoration: none; }
   font-size: 11px;
   color: var(--text-2);
   width: 20px;
+}
+
+/* The LinkedIn mark reads as a link without spending a column on the URL. */
+a.li {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
+  color: var(--accent);
+  text-decoration: none;
+}
+a.li span {
+  font-weight: 500; font-size: 10px; color: var(--text-3);
+  letter-spacing: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  a.li:hover { text-decoration: underline; }
+  a.li:hover span { color: var(--text-2); }
 }
 
 .badge {

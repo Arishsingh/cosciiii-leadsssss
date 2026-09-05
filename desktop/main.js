@@ -210,7 +210,7 @@ const COLUMNS = [
   "phone", "website", "email", "rating", "reviews_count", "opening_hours",
   "latitude", "longitude", "google_maps_url",
   "rera_number", "promoter_name", "promoter_type", "active_projects",
-  "email_confidence", "lead_score", "sources",
+  "email_confidence", "lead_score", "sources", "linkedin",
 ];
 
 function csvCell(v) {

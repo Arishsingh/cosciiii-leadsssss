@@ -34,7 +34,32 @@ COLUMNS = [
     "email_confidence",  # verified | site-crawl | generic | guess | ""
     "lead_score",        # 0-100, see scoring.py
     "sources",           # comma-joined provenance, e.g. "gmaps,rera"
+    "linkedin",          # canonical company page, from the site crawl / Maps contacts
 ]
+
+
+def _linkedin(rec):
+    """Best LinkedIn URL for a raw place record.
+
+    Apify's contact scraper has used more than one key for this over time
+    (`linkedIns`, `linkedIn`, `linkedin`), so rather than betting on one name,
+    the known keys are tried and then the whole record is scanned for a
+    linkedin.com URL. Company pages outrank personal profiles.
+    """
+    from normalize import find_linkedin, norm_linkedin
+
+    for key in ("linkedIns", "linkedins", "linkedIn", "linkedin", "linkedInUrl"):
+        v = rec.get(key)
+        if isinstance(v, list) and v:
+            got = norm_linkedin(v[0])
+            if got:
+                return got
+        elif isinstance(v, str):
+            got = norm_linkedin(v)
+            if got:
+                return got
+    hits = find_linkedin(repr(rec))
+    return hits[0] if hits else ""
 
 
 def _first_email(rec):
@@ -97,6 +122,7 @@ def map_record(rec):
         "email_confidence": rec.get("email_confidence") or "",
         "lead_score": rec.get("lead_score") or 0,
         "sources": rec.get("sources") or "",
+        "linkedin": _linkedin(rec),
     }
 
 

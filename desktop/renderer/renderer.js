@@ -100,6 +100,15 @@ function emailBadge(lead) {
     </div>`;
 }
 
+/** LinkedIn as a compact link — the URL itself is long and never worth a column. */
+function linkedinCell(lead) {
+  const url = (lead.linkedin || "").trim();
+  if (!url) return '<span class="muted">—</span>';
+  const company = url.includes("/company/");
+  return `<a class="li" href="${esc(url)}" target="_blank" rel="noreferrer"
+     title="${esc(url)}">in<span>${company ? "company" : "profile"}</span></a>`;
+}
+
 function scoreCell(score) {
   const n = Number(score) || 0;
   const cls = n >= 70 ? "hi" : n >= 40 ? "" : "lo";
@@ -118,7 +127,7 @@ function visibleLeads() {
     if (el.onlyEmail.checked && !(l.email || "").trim()) return false;
     if (el.onlyVerified.checked && l.email_confidence !== "verified") return false;
     if (!q) return true;
-    return ["name", "city", "district", "email", "phone", "rera_number", "promoter_name"]
+    return ["name", "city", "district", "email", "phone", "rera_number", "promoter_name", "linkedin"]
       .some((f) => String(l[f] ?? "").toLowerCase().includes(q));
   });
 }
@@ -155,6 +164,7 @@ function renderTable(animateFromIndex) {
       <td>${esc(l.district || l.city || "") || '<span class="muted">—</span>'}</td>
       <td class="mono">${esc(l.phone) || '<span class="muted">—</span>'}</td>
       <td>${emailBadge(l)}</td>
+      <td>${linkedinCell(l)}</td>
       <td class="num mono">${Number(l.active_projects) || '<span class="muted">—</span>'}</td>
       <td class="mono muted src">${esc(l.sources || "")}</td>
     </tr>`;
@@ -178,7 +188,7 @@ const DETAIL_FIELDS = [
   ["Lead score", "lead_score"], ["RERA number", "rera_number"],
   ["Promoter", "promoter_name"], ["Registered projects", "active_projects"],
   ["Phone", "phone"], ["Email", "email"], ["Email confidence", "email_confidence"],
-  ["Website", "website"], ["Category", "category"], ["Address", "full_address"],
+  ["Website", "website"], ["LinkedIn", "linkedin"], ["Category", "category"], ["Address", "full_address"],
   ["District", "district"], ["City", "city"], ["Pincode", "postal_code"],
   ["Rating", "rating"], ["Reviews", "reviews_count"], ["Sources", "sources"],
 ];
@@ -192,7 +202,7 @@ function showDetail(lead) {
     if (v === "" || v === null || v === undefined || v === 0) {
       if (key !== "lead_score" && key !== "active_projects") return "";
     }
-    if (key === "website" && v) {
+    if ((key === "website" || key === "linkedin") && v) {
       v = `<a href="${esc(v)}" target="_blank" rel="noreferrer">${esc(v)}</a>`;
     } else if (key === "email" && v) {
       v = `<span class="mono">${esc(v)}</span>`;

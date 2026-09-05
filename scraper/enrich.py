@@ -117,23 +117,27 @@ def has_mx(domain, timeout=6):
 
 
 def crawl_site(website, timeout=12, max_pages=4, delay=0.3, session=None):
-    """Fetch a company's site and return the emails found, best first.
+    """Fetch a company's site and return {"emails": [...], "linkedin": [...]}.
+
+    One crawl serves both: the LinkedIn URL is almost always a footer social
+    icon on the same pages that carry the email, so fetching twice would double
+    the requests for nothing.
 
     Only a handful of likely pages are tried, and only same-host ones — this is
     a targeted contact lookup, not a site spider.
     """
-    from normalize import norm_domain
+    from normalize import find_linkedin, norm_domain
 
     domain = norm_domain(website)
     if not domain:
-        return []
+        return {"emails": [], "linkedin": []}
     s = session or requests.Session()
     s.headers.update({"User-Agent": UA})
 
     base = website if str(website).startswith(("http://", "https://")) else f"https://{domain}"
     base = base.rstrip("/")
 
-    emails, tried = [], 0
+    emails, links, tried = [], [], 0
     for path in CONTACT_PATHS:
         if tried >= max_pages:
             break
@@ -147,12 +151,15 @@ def crawl_site(website, timeout=12, max_pages=4, delay=0.3, session=None):
         for e in clean_emails(r.text, prefer_domain=domain):
             if e not in emails:
                 emails.append(e)
-        # The homepage often has the address in the footer; stop once we have
-        # one on the company's own domain rather than crawling every path.
-        if any(e.endswith("@" + domain) for e in emails):
+        for u in find_linkedin(r.text):
+            if u not in links:
+                links.append(u)
+        # The homepage usually carries both in the footer; stop once we have an
+        # address on the company's own domain rather than crawling every path.
+        if any(e.endswith("@" + domain) for e in emails) and links:
             break
         time.sleep(delay)
-    return emails
+    return {"emails": emails, "linkedin": links}
 
 
 def enrich_record(rec, verify_mx=True, session=None):
@@ -161,35 +168,36 @@ def enrich_record(rec, verify_mx=True, session=None):
     Records that already carry an email are left alone apart from grading its
     confidence, so an address Apify already found is never thrown away.
     """
-    from normalize import norm_domain, norm_email
+    from normalize import norm_domain, norm_email, norm_linkedin
 
     existing = norm_email(rec.get("email"))
+    existing_li = norm_linkedin(rec.get("linkedin"))
     website = rec.get("website") or ""
     domain = norm_domain(website)
 
-    if existing:
-        conf = "generic" if is_generic(existing) else "site-crawl"
-        if verify_mx and has_mx(existing.partition("@")[2]) is True:
+    def grade(email):
+        conf = "generic" if is_generic(email) else "site-crawl"
+        if verify_mx and has_mx(email.partition("@")[2]) is True:
             conf = "verified"
+        return conf
+
+    # Nothing to crawl: keep whatever the record already had.
+    if not domain:
         rec["email"] = existing
-        rec["email_confidence"] = conf
+        rec["email_confidence"] = grade(existing) if existing else ""
+        rec["linkedin"] = existing_li
         return rec
 
-    if not domain:
-        rec.setdefault("email", "")
-        rec["email_confidence"] = ""
+    # Crawl when either field is still missing — one fetch serves both.
+    if existing and existing_li:
+        rec["email"] = existing
+        rec["email_confidence"] = grade(existing)
+        rec["linkedin"] = existing_li
         return rec
 
     found = crawl_site(website, session=session)
-    if not found:
-        rec["email"] = ""
-        rec["email_confidence"] = ""
-        return rec
-
-    best = found[0]
-    conf = "generic" if is_generic(best) else "site-crawl"
-    if verify_mx and has_mx(best.partition("@")[2]) is True:
-        conf = "verified"
-    rec["email"] = best
-    rec["email_confidence"] = conf
+    email = existing or (found["emails"][0] if found["emails"] else "")
+    rec["email"] = email
+    rec["email_confidence"] = grade(email) if email else ""
+    rec["linkedin"] = existing_li or (found["linkedin"][0] if found["linkedin"] else "")
     return rec
