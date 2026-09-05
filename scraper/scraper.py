@@ -93,7 +93,8 @@ def run_harvest(args, emitter):
                 emitter.status("rera", "scraping", f"page {page} — {n} projects stored")
 
         for row in rera.harvest(max_pages=args.max_pages, should_stop=_stopping,
-                                delay=args.delay, on_page=on_page):
+                                delay=args.delay, on_page=on_page,
+                                start_page=args.start_page):
             store.upsert_rera_project(row)
             n += 1
             if n % 50 == 0:
@@ -109,7 +110,10 @@ def run_harvest(args, emitter):
         emitter.done(n, "")
     except Exception as e:  # noqa: BLE001 — surface any failure as an event
         store.commit()
-        emitter.error(f"RERA harvest failed after {n} projects: {e}")
+        store.set_meta("rera_projects", store.rera_count())
+        resume = args.start_page + (n // 10)
+        emitter.error(f"RERA harvest stopped after {n} projects: {e} "
+                      f"— resume with --start-page {resume}")
         return 1
     finally:
         store.close()
@@ -361,6 +365,8 @@ def main(argv=None):
     p.add_argument("--db", default=None, help="SQLite path (default data/leads.db)")
     p.add_argument("--max-pages", type=int, default=None, help="harvest: page cap")
     p.add_argument("--delay", type=float, default=0.6, help="harvest: seconds between pages")
+    p.add_argument("--start-page", type=int, default=1,
+                   help="harvest: resume from this page instead of the first")
     p.add_argument("--no-rera", action="store_true", help="skip the RERA registry spine")
     p.add_argument("--no-enrich", action="store_true", help="skip website email discovery")
     p.add_argument("--no-verify", action="store_true", help="skip MX verification")

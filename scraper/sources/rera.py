@@ -40,6 +40,11 @@ FORM_ID = "promoters_search_page_form"
 # The portal stops serving results past this page on an unfiltered walk.
 MAX_UNFILTERED_PAGE = 1249
 
+# Transient failures are normal over a ~1250-request walk; give up only after
+# this many tries, backing off between them.
+RETRIES = 4
+BACKOFF = 2.0
+
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -120,13 +125,28 @@ class ReraSession:
         self._fbid = None
 
     def _get(self, **params):
-        try:
-            r = self.s.get(BASE, params=params, timeout=self.timeout)
-        except requests.RequestException as e:
-            raise ReraError(f"network error: {e}") from e
-        if r.status_code != 200:
-            raise ReraError(f"HTTP {r.status_code}")
-        return r.text
+        """GET with retries.
+
+        A full walk is ~1250 requests over the better part of an hour against a
+        government portal, so a transient read timeout or 5xx is expected at
+        least once. Without retries a single blip discards the whole run, which
+        is exactly what happened at page 730 of the first full harvest.
+        """
+        last = None
+        for attempt in range(RETRIES):
+            try:
+                r = self.s.get(BASE, params=params, timeout=self.timeout)
+                if r.status_code == 200:
+                    return r.text
+                # 4xx other than rate-limiting is not going to fix itself.
+                if 400 <= r.status_code < 500 and r.status_code != 429:
+                    raise ReraError(f"HTTP {r.status_code}")
+                last = ReraError(f"HTTP {r.status_code}")
+            except requests.RequestException as e:
+                last = ReraError(f"network error: {e}")
+            if attempt < RETRIES - 1:
+                time.sleep(BACKOFF * (2 ** attempt))
+        raise last or ReraError("request failed")
 
     def _form_build_id(self):
         """Return this session's Drupal form build id, fetching it once.
@@ -165,7 +185,7 @@ class ReraSession:
         return parse_page(self._get(page=n))
 
 
-def _walk(session, first_rows, max_pages, should_stop, on_page):
+def _walk(session, first_rows, max_pages, should_stop, on_page, start_page=1):
     """Yield rows from page 1 onward, stopping at the end of the result set.
 
     The portal serves the *last valid page* rather than an empty one when you
@@ -174,7 +194,7 @@ def _walk(session, first_rows, max_pages, should_stop, on_page):
     """
     seen_sig = None
     rows = first_rows
-    page = 1
+    page = start_page
     while True:
         if should_stop and should_stop():
             return
@@ -197,7 +217,7 @@ def _walk(session, first_rows, max_pages, should_stop, on_page):
         rows = session.page(page)
 
 
-def harvest(max_pages=None, on_page=None, should_stop=None, delay=0.6):
+def harvest(max_pages=None, on_page=None, should_stop=None, delay=0.6, start_page=1):
     """Yield every project reachable by an unfiltered walk (up to the cap).
 
     ~12,490 projects at 10 per page. At the default delay this is roughly an
@@ -205,7 +225,10 @@ def harvest(max_pages=None, on_page=None, should_stop=None, delay=0.6):
     something run per search.
     """
     sess = ReraSession(delay=delay)
-    yield from _walk(sess, sess.page(1), max_pages, should_stop, on_page)
+    # start_page lets an interrupted harvest resume instead of re-walking
+    # everything it already stored.
+    yield from _walk(sess, sess.page(start_page), max_pages, should_stop, on_page,
+                     start_page=start_page)
 
 
 def search_by_name(name, max_pages=40, on_page=None, should_stop=None, delay=0.6):
