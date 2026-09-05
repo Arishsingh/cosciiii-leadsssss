@@ -36,6 +36,42 @@ CONTACT_PATHS = ["", "/contact", "/contact-us", "/contactus", "/about", "/about-
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
+# Cloudflare's email obfuscation replaces the address with a hex blob; the page
+# renders it in JavaScript. It is extremely common on small business sites, so
+# without decoding it a large share of contact pages look like they have no
+# email at all.
+_CF_RE = re.compile(r'data-cfemail="([0-9a-fA-F]+)"')
+
+# Addresses written to dodge naive scrapers: "info [at] example [dot] com".
+_OBFUSCATED_RE = re.compile(
+    r"([A-Za-z0-9._%+\-]+)\s*(?:\[at\]|\(at\)|\s+at\s+)\s*"
+    r"([A-Za-z0-9.\-]+)\s*(?:\[dot\]|\(dot\)|\s+dot\s+)\s*([A-Za-z]{2,})",
+    re.I,
+)
+
+# Links worth following when they appear on the homepage. Matching the actual
+# anchors beats guessing fixed paths: sites use /contact-us, /reach-us,
+# /get-in-touch, /enquiry and plenty else besides.
+_CONTACT_HINT = re.compile(r"contact|about|reach|touch|enquir|inquir|connect|team", re.I)
+
+
+def decode_cf_email(hex_blob):
+    """Decode one Cloudflare-obfuscated address.
+
+    The first byte is an XOR key applied to every following byte.
+    """
+    try:
+        data = bytes.fromhex(hex_blob)
+    except ValueError:
+        return ""
+    if len(data) < 2:
+        return ""
+    key = data[0]
+    try:
+        return "".join(chr(b ^ key) for b in data[1:])
+    except ValueError:
+        return ""
+
 # Addresses that appear in markup but belong to tooling, not the business.
 _JUNK_DOMAINS = {
     "sentry.io", "wixpress.com", "example.com", "domain.com", "email.com",
@@ -65,13 +101,24 @@ _MX_LOCK = threading.Lock()
 def clean_emails(text, prefer_domain=""):
     """Pull plausible business emails out of raw page text/markup.
 
-    When `prefer_domain` is given, addresses on that domain sort first — a
-    builder's own `@kumarbuilders.com` beats a gmail address dropped in a
-    footer credit, and both beat an agency's address.
+    Handles plain addresses, Cloudflare-obfuscated ones, and the
+    "info [at] example [dot] com" dodge. When `prefer_domain` is given,
+    addresses on that domain sort first — a builder's own
+    `@kumarbuilders.com` beats a gmail address dropped in a footer credit, and
+    both beat an agency's address.
     """
+    text = text or ""
+    candidates = list(_EMAIL_RE.findall(text))
+    candidates += [decode_cf_email(h) for h in _CF_RE.findall(text)]
+    candidates += [f"{a}@{b}.{c}" for a, b, c in _OBFUSCATED_RE.findall(text)]
+
     found = []
-    for raw in _EMAIL_RE.findall(text or ""):
+    for raw in candidates:
+        if not raw:
+            continue
         e = raw.strip().strip(".").lower()
+        if "@" not in e:
+            continue
         if _FILE_EXT_RE.search(e):
             continue
         local, _, domain = e.partition("@")
