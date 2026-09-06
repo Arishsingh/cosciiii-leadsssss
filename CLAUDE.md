@@ -46,7 +46,7 @@ RERA registry (who is a real developer + project counts)
 
 Facts that span multiple files:
 
-- **`scraper/mapping.py::COLUMNS` is the schema boundary, and the 22 columns are
+- **`scraper/mapping.py::COLUMNS` is the schema boundary, and the 23 columns are
   load-bearing in three places**: `mapping.py`, `events.py::CsvWriter`, and
   `desktop/main.js::COLUMNS` (the filtered-export writer). Change one, change
   all three, or the export CSV drifts from the run CSV. The first 15 keep their
