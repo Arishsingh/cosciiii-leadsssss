@@ -64,6 +64,14 @@ Facts that span multiple files:
   alone, and `email` only moves *up* the `EMAIL_CONFIDENCE_RANK` ladder — a
   freshly-guessed address must not overwrite a verified one.
 
+- **`place.py` gates every record on the district the user typed.** Google
+  answers a city search with neighbouring districts and sometimes other
+  states, so `publish()` drops anything whose own city/district/state/address
+  does not name the searched place. Confusables are explicit: "Navi Mumbai" is
+  a different district and must not pass a Mumbai search. An `area` narrows the
+  gate only when it is a pincode — a neighbourhood name narrows the Maps query
+  instead, because addresses spell the same neighbourhood many ways.
+
 - **RERA is read before Maps in `run_search`, deliberately.** Seeding the
   registry first means Maps records land on top of an already-identified
   promoter and inherit its registration number, rather than creating an
