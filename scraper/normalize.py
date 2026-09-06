@@ -198,3 +198,17 @@ def norm_city(value):
     if not value:
         return ""
     return re.sub(r"[^\w\s]", " ", str(value).upper()).strip()
+
+
+def display_phone(value):
+    """Strip the domestic trunk prefix from a number kept for display.
+
+    Maps hands back numbers in national dialling form — "086513 57287",
+    "022 2269 1166". The leading 0 is only how you dial the number from
+    inside India, not part of the number itself, so it is dropped for
+    display and export. Spacing is left exactly as the source wrote it.
+    """
+    v = str(value or "").strip()
+    if not v.startswith("0"):
+        return v
+    return v.lstrip("0").lstrip()

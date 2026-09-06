@@ -38,6 +38,8 @@ from db import LeadStore
 from enrich import enrich_many
 from events import CsvWriter, Emitter
 from mapping import COLUMNS, map_record
+from normalize import display_phone
+from place import PlaceFilter
 from scoring import score_lead
 from sources import apify
 from vertical import looks_like_broker, search_queries
@@ -264,6 +266,8 @@ def run_search(args, emitter):
 
     live = {}      # company id -> latest record, the single source of truth
     dropped = {"n": 0}
+    outside = {"n": 0}
+    place = PlaceFilter(args.location, args.area)
 
     def snapshot(cid):
         row = store.get(cid)
@@ -286,12 +290,19 @@ def run_search(args, emitter):
         rec = rec or snapshot(cid)
         if rec is None:
             return
+        # Google answers a city search with neighbouring districts too, so a
+        # record has to place itself in the searched district before it counts.
+        if not place.allows(rec):
+            if cid not in live:
+                outside["n"] += 1
+            return
         if not args.keep_brokers and looks_like_broker(rec):
             if cid not in live:
                 dropped["n"] += 1
             return
         score, _ = score_lead(rec)
         rec["lead_score"] = score
+        rec["phone"] = display_phone(rec.get("phone"))
         rec["id"] = cid
         live[cid] = rec
         emitter.lead(rec)
@@ -313,6 +324,10 @@ def run_search(args, emitter):
             _sweep_maps(args, store, emitter, publish)
             emitter.progress(len(live))
 
+        if outside["n"]:
+            where = f"{args.area}, {args.location}" if args.area else args.location
+            emitter.status("-", "scraping",
+                           f"dropped {outside['n']} listings outside {where}")
         if dropped["n"]:
             emitter.status("-", "scraping",
                            f"filtered out {dropped['n']} broker / supplier listings")
