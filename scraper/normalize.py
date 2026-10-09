@@ -193,6 +193,46 @@ def find_linkedin(text):
     return sorted(out, key=lambda u: (0 if "/company/" in u else 1, len(u)))
 
 
+# Only the legal form — not the industry words. "Nirman Properties" and
+# "Nirman Developers" share a `name_key`, which is fine for dedupe inside one
+# pincode but not for choosing between two firms Google lists side by side.
+_LEGAL_ONLY = {"M", "S", "MS", "PRIVATE", "PVT", "LIMITED", "LTD", "P", "LLP",
+               "LLC", "INC", "CO", "COMPANY", "AND"}
+
+
+def _title_core(title, place=""):
+    """A Maps title without the branch/location tail and the searched place.
+
+    Maps titles carry decoration a registry name never does: "Kolte Patil
+    Developers, Pune", "Gera Developments - Corporate Office", "Nirman Greens
+    (Head Office)". Everything after the first separator is dropped, and so is
+    the place name itself, which Maps often appends without a separator.
+    """
+    core = re.split(r"\s[-–|]\s|,|\(", str(title or ""), maxsplit=1)[0]
+    drop = set(norm_city(place).split())
+    return " ".join(w for w in re.sub(r"[^\w\s]", " ", core.upper()).split()
+                    if w not in drop)
+
+
+def same_firm(registered, title, place="", strict=False, threshold=0.88):
+    """True when a Maps title names the registered promoter.
+
+    `strict` is for a pick Google itself was unsure of — a list of results
+    rather than a single place. There the names must agree on every word but
+    the legal form, because the near-misses in such a list are usually real,
+    different firms with the same first word.
+    """
+    core = _title_core(title, place)
+    if strict:
+        def words(v):
+            v = re.sub(r"\bM/?S\.?\b", " ", str(v or "").upper())
+            return sorted(w for w in re.sub(r"[^\w\s]", " ", v).split()
+                          if w not in _LEGAL_ONLY and w not in set(norm_city(place).split()))
+        a, b = words(registered), words(core)
+        return bool(a) and a == b
+    return key_similarity(name_key(registered), name_key(core), threshold) >= threshold
+
+
 def norm_city(value):
     """Uppercase, punctuation-free city/district name for coarse comparison."""
     if not value:

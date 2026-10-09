@@ -133,7 +133,11 @@ def _parse_place(page, url):
     """Open a place URL and extract a raw record (Apify key shape)."""
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(1200)
+    return _read_place(page, url)
 
+
+def _read_place(page, url):
+    """Extract a raw record from the place panel already open in `page`."""
     rec = {}
     rec["url"] = page.url
 
@@ -223,3 +227,99 @@ def scrape(search_string, max_results, on_status=None, should_stop=None):
                 time.sleep(0.4)
         finally:
             browser.close()
+
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+)
+
+
+def _find_one(page, name, place):
+    """Search Maps for one named firm and return its raw record, or None.
+
+    A specific name usually lands straight on the place panel. When Google
+    answers with a list instead, it is unsure, and the list is mostly other
+    firms sharing a first word — so only an exact name match is taken from it.
+    """
+    from normalize import same_firm
+
+    page.goto(SEARCH_URL.format(query=f"{name} {place}".replace(" ", "+")),
+              wait_until="domcontentloaded", timeout=30000)
+    _accept_consent(page)
+    try:
+        page.wait_for_selector('div[role="feed"], button[data-item-id="address"]',
+                               timeout=10000)
+    except Exception:
+        return None
+    page.wait_for_timeout(800)
+
+    if page.locator('div[role="feed"]').count() == 0:
+        rec = _read_place(page, page.url)
+        return rec if same_firm(name, rec.get("title"), place) else None
+
+    cards = page.locator('div[role="feed"] a[href*="/maps/place/"]')
+    for i in range(min(cards.count(), 6)):
+        label = _attr_or_empty(cards.nth(i), "aria-label")
+        if same_firm(name, label, place, strict=True):
+            href = _attr_or_empty(cards.nth(i), "href")
+            return _parse_place(page, href) if href else None
+    return None
+
+
+def find_places(targets, workers=3, should_stop=None):
+    """Look up named firms on Maps, yielding (key, raw record or None).
+
+    `targets` is a list of (key, name, place). Each worker thread runs its own
+    Playwright instance, because the sync API is bound to the thread that
+    started it. Only the browsing happens off-thread: results come back through
+    a queue so the caller can keep its SQLite writes on one connection.
+    """
+    import queue
+    import threading
+
+    from playwright.sync_api import sync_playwright
+
+    if should_stop is None:
+        should_stop = lambda: False  # noqa: E731 - trivial default
+
+    todo = queue.Queue()
+    for t in targets:
+        todo.put(t)
+    out = queue.Queue()
+    _DONE = object()
+
+    def work():
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                try:
+                    page = browser.new_page(user_agent=_USER_AGENT)
+                    while not should_stop():
+                        try:
+                            key, name, place = todo.get_nowait()
+                        except queue.Empty:
+                            break
+                        try:
+                            out.put((key, _find_one(page, name, place)))
+                        except Exception:
+                            # One slow or odd result must not end the lookup.
+                            out.put((key, None))
+                finally:
+                    browser.close()
+        except Exception:
+            pass
+        finally:
+            out.put(_DONE)
+
+    threads = [threading.Thread(target=work, daemon=True)
+               for _ in range(max(1, min(workers, len(targets))))]
+    for t in threads:
+        t.start()
+    running = len(threads)
+    while running:
+        item = out.get()
+        if item is _DONE:
+            running -= 1
+        else:
+            yield item

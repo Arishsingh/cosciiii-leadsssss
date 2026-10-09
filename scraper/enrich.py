@@ -20,6 +20,7 @@ mailing unverified guesses is the fastest way to burn a sending domain.
 import re
 import threading
 import time
+from urllib.parse import unquote
 
 import requests
 
@@ -116,7 +117,10 @@ def clean_emails(text, prefer_domain=""):
     for raw in candidates:
         if not raw:
             continue
-        e = raw.strip().strip(".").lower()
+        # mailto: hrefs are URL-encoded, and "mailto:%20sales@x.com" (a stray
+        # space) is common enough that the escape would otherwise be exported
+        # as part of the address.
+        e = unquote(raw).strip().strip(".").lower()
         if "@" not in e:
             continue
         if _FILE_EXT_RE.search(e):

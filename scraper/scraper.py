@@ -249,6 +249,62 @@ def _sweep_maps(args, store, emitter, publish):
     return got
 
 
+def _lookup_registry(args, store, emitter, live, place, publish):
+    """Find a Maps listing for each registered promoter still without contacts.
+
+    The category sweep returns a few dozen listings at most, while the registry
+    contributes hundreds of promoters — so most promoters were never matched to
+    any listing and stayed name-only rows: no phone, no website, and therefore
+    nothing for enrichment to crawl for an email or LinkedIn. Searching each
+    promoter by name is what fills them in.
+
+    Busiest promoters first, capped at the number of builders requested, since
+    each lookup is a browser round trip of a few seconds.
+    """
+    if args.source == "apify":
+        return
+    bare = sorted(
+        ((cid, r) for cid, r in live.items()
+         if (r.get("rera_number") or "").strip()
+         and not (r.get("phone") or "").strip()
+         and not (r.get("website") or "").strip()),
+        key=lambda item: -int(item[1].get("active_projects") or 0),
+    )[: args.max_results]
+    if not bare:
+        return
+    where = f"{args.area} {args.location}" if args.area else args.location
+    targets = [(cid, r.get("promoter_name") or r.get("name"), where) for cid, r in bare]
+    emitter.status("browser", "starting",
+                   f"looking up {len(targets)} registered builders on Maps by name…")
+    try:
+        from sources import browser
+    except ImportError:
+        return
+    done = found = 0
+    for cid, raw in browser.find_places(targets, workers=args.lookup_workers,
+                                        should_stop=_stopping):
+        done += 1
+        lead = map_record(raw) if raw else None
+        # The listing has to be in the searched district on its own evidence;
+        # the promoter's registry address would otherwise vouch for it.
+        if lead and place.allows(lead):
+            other = store.find_match({k: lead[k] for k in ("phone", "website")})
+            # Already on the list under its Maps name: attaching the same
+            # phone here would export the firm twice.
+            if other is None or other["id"] == cid:
+                lead["rera_number"] = live[cid]["rera_number"]
+                store.upsert(lead, "gmaps", lead.get("google_maps_url", ""))
+                publish(cid)
+                found += 1
+        if done % 10 == 0:
+            store.commit()
+            emitter.status("browser", "scraping",
+                           f"{done}/{len(targets)} looked up, {found} found on Maps")
+    store.commit()
+    emitter.status("browser", "done",
+                   f"found {found} of {len(targets)} registered builders on Maps")
+
+
 def run_search(args, emitter):
     """Produce a ranked builder list, streaming results as they become known.
 
@@ -323,6 +379,10 @@ def run_search(args, emitter):
         if not _stopping():
             _sweep_maps(args, store, emitter, publish)
             emitter.progress(len(live))
+
+        # 2b. Registry promoters the sweep never matched, searched by name.
+        if not _stopping() and not getattr(args, "no_lookup", False):
+            _lookup_registry(args, store, emitter, live, place, publish)
 
         if outside["n"]:
             where = f"{args.area}, {args.location}" if args.area else args.location
@@ -424,6 +484,10 @@ def main(argv=None):
     p.add_argument("--no-verify", action="store_true", help="skip MX verification")
     p.add_argument("--enrich-workers", type=int, default=10,
                    help="concurrent website crawls during enrichment")
+    p.add_argument("--no-lookup", action="store_true",
+                   help="skip searching Maps by name for unmatched RERA promoters")
+    p.add_argument("--lookup-workers", type=int, default=3,
+                   help="concurrent browsers for the by-name Maps lookup")
     p.add_argument("--keep-brokers", action="store_true", help="do not filter non-builders")
     p.add_argument("--only-with-email", action="store_true")
     p.add_argument("--only-verified-email", action="store_true")
